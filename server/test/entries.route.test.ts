@@ -123,4 +123,60 @@ describe('entries API', () => {
     expect(res.status).toBe(204);
     expect((await request(app).get('/api/entries')).body).toHaveLength(0);
   });
+
+  it('POST /api/entries stores recurrence when Gemini detects one', async () => {
+    const gemini = mockGemini(JSON.stringify({
+      domain: 'finance', type: 'expense', structured: {}, remind_at: '2026-01-05T00:00:00.000Z',
+      recurrence: { freq: 'monthly', interval: 1 },
+    }));
+    const app = buildApp(db, gemini as never);
+
+    const res = await request(app).post('/api/entries').send({ raw_text: 'pay rent every month' });
+
+    expect(res.status).toBe(201);
+    expect(JSON.parse(res.body.recurrence)).toEqual({ freq: 'monthly', interval: 1 });
+  });
+
+  it('GET /api/entries advances due recurring entries before listing', async () => {
+    const gemini = mockGemini(JSON.stringify({
+      domain: 'finance', type: 'expense', structured: {}, remind_at: '2020-01-05T00:00:00.000Z',
+      recurrence: { freq: 'monthly', interval: 1 },
+    }));
+    const app = buildApp(db, gemini as never);
+    await request(app).post('/api/entries').send({ raw_text: 'pay rent every month' });
+
+    const res = await request(app).get('/api/entries');
+
+    expect(res.body).toHaveLength(2);
+  });
+
+  it('PATCH /api/entries/:id returns 400 for an invalid recurrence freq', async () => {
+    const gemini = mockGemini(JSON.stringify({ domain: 'personal', type: 'note', structured: {}, remind_at: null }));
+    const app = buildApp(db, gemini as never);
+    const created = await request(app).post('/api/entries').send({ raw_text: 'note' });
+
+    const res = await request(app)
+      .patch(`/api/entries/${created.body.id}`)
+      .send({ recurrence: { freq: 'hourly', interval: 1 } });
+
+    expect(res.status).toBe(400);
+  });
+
+  it('PATCH /api/entries/:id accepts a valid recurrence and clearing it', async () => {
+    const gemini = mockGemini(JSON.stringify({ domain: 'personal', type: 'note', structured: {}, remind_at: null }));
+    const app = buildApp(db, gemini as never);
+    const created = await request(app).post('/api/entries').send({ raw_text: 'note' });
+
+    const withRecurrence = await request(app)
+      .patch(`/api/entries/${created.body.id}`)
+      .send({ recurrence: { freq: 'weekly', interval: 2 } });
+    expect(withRecurrence.status).toBe(200);
+    expect(JSON.parse(withRecurrence.body.recurrence)).toEqual({ freq: 'weekly', interval: 2 });
+
+    const cleared = await request(app)
+      .patch(`/api/entries/${created.body.id}`)
+      .send({ recurrence: null });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.recurrence).toBeNull();
+  });
 });

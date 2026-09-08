@@ -3,16 +3,27 @@ import type Database from 'better-sqlite3';
 import type { GoogleGenAI } from '@google/genai';
 import { classifyEntry } from '../gemini.js';
 import {
-  createEntry, listEntries, listDueEntries, updateEntry, deleteEntry,
-  type Domain, type EntryType,
+  createEntry, listEntries, listDueEntries, updateEntry, deleteEntry, advanceRecurringEntries,
+  type Domain, type EntryType, type RecurrenceFreq,
 } from '../db.js';
 
 const DOMAINS: Domain[] = ['work', 'finance', 'personal'];
 const TYPES: EntryType[] = ['task', 'expense', 'note', 'reminder', 'event'];
+const RECURRENCE_FREQS: RecurrenceFreq[] = ['daily', 'weekly', 'monthly', 'yearly'];
 
 function parseId(raw: string): number | undefined {
   const id = Number(raw);
   return Number.isInteger(id) ? id : undefined;
+}
+
+function isValidRecurrence(value: unknown): boolean {
+  if (value === null) return true;
+  if (typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.freq === 'string' && RECURRENCE_FREQS.includes(v.freq as RecurrenceFreq) &&
+    typeof v.interval === 'number' && v.interval > 0
+  );
 }
 
 export function entriesRouter(db: Database.Database, gemini: Pick<GoogleGenAI, 'models'>): Router {
@@ -31,6 +42,7 @@ export function entriesRouter(db: Database.Database, gemini: Pick<GoogleGenAI, '
         type: classified.type,
         structured: classified.structured,
         remind_at: classified.remind_at,
+        recurrence: classified.recurrence,
       });
       res.status(201).json(entry);
     } catch (err) {
@@ -39,11 +51,13 @@ export function entriesRouter(db: Database.Database, gemini: Pick<GoogleGenAI, '
   });
 
   router.get('/', (_req, res) => {
+    advanceRecurringEntries(db, new Date().toISOString());
     res.json(listEntries(db));
   });
 
   router.get('/due', (req, res) => {
     const before = typeof req.query.before === 'string' ? req.query.before : new Date().toISOString();
+    advanceRecurringEntries(db, new Date().toISOString());
     res.json(listDueEntries(db, before));
   });
 
@@ -57,6 +71,11 @@ export function entriesRouter(db: Database.Database, gemini: Pick<GoogleGenAI, '
     }
     if (body.type !== undefined && !TYPES.includes(body.type)) {
       return res.status(400).json({ error: `type must be one of ${TYPES.join(', ')}` });
+    }
+    if (body.recurrence !== undefined && !isValidRecurrence(body.recurrence)) {
+      return res.status(400).json({
+        error: `recurrence must be null or { freq: ${RECURRENCE_FREQS.join('|')}, interval: positive number }`,
+      });
     }
 
     const updated = updateEntry(db, id, body);
