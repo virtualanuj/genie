@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import CaptureBox from './CaptureBox.js';
 import EntryList from './EntryList.js';
 import DuePanel from './DuePanel.js';
+import SearchBox from './SearchBox.js';
 import { listEntries, deleteEntry, updateEntry, type Entry } from './api.js';
 
 export default function App() {
@@ -27,6 +28,7 @@ export default function App() {
           setEntries((prev) => prev.map((e) => (e.id === id ? updated : e)));
         }}
       />
+      <SearchBox />
     </div>
   );
 }
