@@ -6,12 +6,17 @@ export interface Entry {
   structured: string;
   tags: string | null;
   remind_at: string | null;
+  recurrence: string | null;
+  series_id: number | null;
   created_at: string;
   updated_at: string;
 }
 
 export const DOMAINS: Entry['domain'][] = ['work', 'finance', 'personal'];
 export const TYPES: Entry['type'][] = ['task', 'expense', 'note', 'reminder', 'event'];
+export const RECURRENCE_FREQS = ['daily', 'weekly', 'monthly', 'yearly'] as const;
+export type RecurrenceFreq = (typeof RECURRENCE_FREQS)[number];
+export interface Recurrence { freq: RecurrenceFreq; interval: number }
 
 export async function createEntry(rawText: string): Promise<Entry> {
   const res = await fetch('/api/entries', {
@@ -45,7 +50,7 @@ export async function deleteEntry(id: number): Promise<void> {
 
 export async function updateEntry(
   id: number,
-  fields: Pick<Entry, 'raw_text' | 'domain' | 'type'>
+  fields: Pick<Entry, 'raw_text' | 'domain' | 'type'> & { recurrence: Recurrence | null }
 ): Promise<Entry> {
   const res = await fetch(`/api/entries/${id}`, {
     method: 'PATCH',

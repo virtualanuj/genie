@@ -5,7 +5,13 @@ import type { Entry } from '../src/api.js';
 
 const entry: Entry = {
   id: 1, raw_text: 'buy milk', domain: 'personal', type: 'task', structured: '{}',
-  tags: null, remind_at: null, created_at: '2024-01-01T00:00:00.000Z', updated_at: '2024-01-01T00:00:00.000Z',
+  tags: null, remind_at: null, recurrence: null, series_id: null,
+  created_at: '2024-01-01T00:00:00.000Z', updated_at: '2024-01-01T00:00:00.000Z',
+};
+
+const recurringEntry: Entry = {
+  ...entry, id: 2, raw_text: 'pay rent',
+  recurrence: JSON.stringify({ freq: 'monthly', interval: 1 }),
 };
 
 describe('EntryList', () => {
@@ -41,7 +47,7 @@ describe('EntryList', () => {
     fireEvent.change(screen.getByRole('combobox', { name: /type/i }), { target: { value: 'note' } });
     fireEvent.click(screen.getByRole('button', { name: /save/i }));
 
-    expect(onEdit).toHaveBeenCalledWith(1, { raw_text: 'buy oat milk', domain: 'work', type: 'note' });
+    expect(onEdit).toHaveBeenCalledWith(1, { raw_text: 'buy oat milk', domain: 'work', type: 'note', recurrence: null });
   });
 
   it('Cancel exits edit mode without calling onEdit', () => {
@@ -52,5 +58,35 @@ describe('EntryList', () => {
 
     expect(onEdit).not.toHaveBeenCalled();
     expect(screen.getByText('buy milk')).toBeInTheDocument();
+  });
+
+  it('shows a recurrence indicator for entries with a recurrence', () => {
+    render(<EntryList entries={[recurringEntry]} onDelete={() => {}} onEdit={() => {}} />);
+    expect(screen.getByTitle(/recurs monthly/i)).toBeInTheDocument();
+  });
+
+  it('does not show a recurrence indicator for non-recurring entries', () => {
+    render(<EntryList entries={[entry]} onDelete={() => {}} onEdit={() => {}} />);
+    expect(screen.queryByTitle(/recurs/i)).not.toBeInTheDocument();
+  });
+
+  it('edit form lets you set a recurrence on a non-recurring entry', () => {
+    const onEdit = vi.fn();
+    render(<EntryList entries={[entry]} onDelete={() => {}} onEdit={onEdit} />);
+    fireEvent.click(screen.getByRole('button', { name: /^edit$/i }));
+    fireEvent.change(screen.getByRole('combobox', { name: /repeats/i }), { target: { value: 'weekly' } });
+    fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+    expect(onEdit).toHaveBeenCalledWith(1, expect.objectContaining({ recurrence: { freq: 'weekly', interval: 1 } }));
+  });
+
+  it('edit form lets you clear an existing recurrence', () => {
+    const onEdit = vi.fn();
+    render(<EntryList entries={[recurringEntry]} onDelete={() => {}} onEdit={onEdit} />);
+    fireEvent.click(screen.getByRole('button', { name: /^edit$/i }));
+    fireEvent.change(screen.getByRole('combobox', { name: /repeats/i }), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+    expect(onEdit).toHaveBeenCalledWith(2, expect.objectContaining({ recurrence: null }));
   });
 });

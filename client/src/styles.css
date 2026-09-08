@@ -454,3 +454,10 @@ select {
     transition: none !important;
   }
 }
+
+.recur-indicator {
+  flex: none;
+  color: var(--accent);
+  font-size: 13px;
+  cursor: default;
+}
