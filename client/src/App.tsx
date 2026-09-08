@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import CaptureBox from './CaptureBox.js';
 import EntryList from './EntryList.js';
+import DuePanel from './DuePanel.js';
 import { listEntries, deleteEntry, updateEntry, type Entry } from './api.js';
 
 export default function App() {
@@ -14,6 +15,7 @@ export default function App() {
     <div>
       <h1>Genie</h1>
       <CaptureBox onCaptured={(entry) => setEntries((prev) => [entry, ...prev])} />
+      <DuePanel />
       <EntryList
         entries={entries}
         onDelete={async (id) => {
