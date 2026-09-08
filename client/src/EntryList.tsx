@@ -28,17 +28,23 @@ export default function EntryList({
     cancelEdit();
   }
 
+  if (entries.length === 0) {
+    return <p className="empty-note">Nothing captured yet — try the box above.</p>;
+  }
+
   return (
-    <ul>
+    <ul className="entry-list">
       {entries.map((entry) => (
-        <li key={entry.id}>
+        <li key={entry.id} className="entry-row">
           {editingId === entry.id && draft ? (
-            <>
+            <div className="entry-edit-row">
               <input
+                className="entry-edit-input"
                 value={draft.raw_text}
                 onChange={(e) => setDraft({ ...draft, raw_text: e.target.value })}
               />
               <select
+                className="entry-edit-select"
                 aria-label="domain"
                 value={draft.domain}
                 onChange={(e) => setDraft({ ...draft, domain: e.target.value as Entry['domain'] })}
@@ -46,21 +52,25 @@ export default function EntryList({
                 {DOMAINS.map((d) => <option key={d} value={d}>{d}</option>)}
               </select>
               <select
+                className="entry-edit-select"
                 aria-label="type"
                 value={draft.type}
                 onChange={(e) => setDraft({ ...draft, type: e.target.value as Entry['type'] })}
               >
                 {TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
               </select>
-              <button onClick={saveEdit}>Save</button>
-              <button onClick={cancelEdit}>Cancel</button>
-            </>
+              <button className="btn-save" onClick={saveEdit}>Save</button>
+              <button className="btn-cancel" onClick={cancelEdit}>Cancel</button>
+            </div>
           ) : (
             <>
-              <span>{entry.raw_text}</span>
-              <small> ({entry.domain}/{entry.type})</small>
-              <button onClick={() => startEdit(entry)}>Edit</button>
-              <button onClick={() => onDelete(entry.id)}>Delete</button>
+              <span className={`entry-dot domain-${entry.domain}`} aria-hidden="true" />
+              <span className="entry-text">{entry.raw_text}</span>
+              <small className="entry-meta"> ({entry.domain}/{entry.type})</small>
+              <span className="entry-actions">
+                <button className="btn-text" onClick={() => startEdit(entry)}>Edit</button>
+                <button className="btn-text" onClick={() => onDelete(entry.id)}>Delete</button>
+              </span>
             </>
           )}
         </li>

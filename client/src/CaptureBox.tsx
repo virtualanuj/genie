@@ -42,16 +42,17 @@ export default function CaptureBox({ onCaptured }: { onCaptured: (entry: Entry) 
   }
 
   return (
-    <form onSubmit={handleSubmit}>
+    <form className="capture-form" onSubmit={handleSubmit}>
       <input
+        className="capture-input"
         placeholder="Type or say something..."
         value={text}
         onChange={(e) => setText(e.target.value)}
       />
       {RecognitionCtor && (
-        <button type="button" aria-label="Speak" onClick={handleSpeak}>🎤 Speak</button>
+        <button type="button" className="mic-button" aria-label="Speak" onClick={handleSpeak}>🎤</button>
       )}
-      <button type="submit" disabled={submitting}>Add</button>
+      <button type="submit" className="add-button" disabled={submitting}>Add</button>
     </form>
   );
 }
