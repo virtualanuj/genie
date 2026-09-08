@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import CaptureBox from '../src/CaptureBox.js';
 
 describe('CaptureBox', () => {
@@ -27,5 +27,32 @@ describe('CaptureBox', () => {
     fireEvent.change(input, { target: { value: 'buy milk' } });
     fireEvent.click(screen.getByRole('button', { name: /add/i }));
     await waitFor(() => expect(input.value).toBe(''));
+  });
+
+  it('fills the input from a speech recognition result when the mic button is clicked', () => {
+    let recognitionInstance: { onresult?: (e: unknown) => void; start: () => void } | undefined;
+    class FakeRecognition {
+      onresult?: (e: unknown) => void;
+      start() { /* no-op; test triggers onresult directly */ }
+      constructor() { recognitionInstance = this; }
+    }
+    (globalThis as unknown as { webkitSpeechRecognition: unknown }).webkitSpeechRecognition = FakeRecognition;
+
+    try {
+      render(<CaptureBox onCaptured={() => {}} />);
+      fireEvent.click(screen.getByRole('button', { name: /speak/i }));
+      act(() => {
+        recognitionInstance!.onresult!({ results: [[{ transcript: 'buy oat milk' }]] });
+      });
+
+      expect((screen.getByPlaceholderText(/type or say something/i) as HTMLInputElement).value).toBe('buy oat milk');
+    } finally {
+      delete (globalThis as unknown as { webkitSpeechRecognition?: unknown }).webkitSpeechRecognition;
+    }
+  });
+
+  it('does not render the mic button when speech recognition is unsupported', () => {
+    render(<CaptureBox onCaptured={() => {}} />);
+    expect(screen.queryByRole('button', { name: /speak/i })).not.toBeInTheDocument();
   });
 });
