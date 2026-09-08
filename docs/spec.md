@@ -57,8 +57,10 @@ captured:
 ## Reminders
 
 A "Due / Upcoming" panel on the home screen queries entries where
-`remind_at` is set and is due soon or already past. No push
-notifications in v1 — the user sees this when the app is open.
+`remind_at` is set and falls at or before "now + 24 hours" — i.e.
+already overdue, or due within the next day. This 24-hour look-ahead
+window is fixed for v1 (not configurable per entry or globally). No
+push notifications — the user sees this when the app is open.
 
 ## Search & Q&A
 
@@ -66,6 +68,14 @@ A search box takes a plain-language question. The backend does a
 first-pass filter over SQLite (by domain, date range, keyword match)
 to narrow candidate rows, then sends those rows plus the user's
 question to Claude, which synthesizes a direct answer.
+
+**Known v1 limitation**: the first-pass filter matches on literal
+word overlap between the question and stored text/fields. A question
+using different vocabulary than what was captured (e.g. asking about
+"food" when an entry's category is "groceries") may fail to surface
+a relevant entry, since Claude only sees whatever passed the filter.
+Acceptable for v1; revisit with embedding-based or broader recall if
+it proves to be a real problem in practice.
 
 ## Tech stack
 

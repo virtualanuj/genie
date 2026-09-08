@@ -18,6 +18,10 @@
 - Voice input uses the browser's built-in Web Speech API — no external transcription service.
 - All Claude API calls take the client as a parameter (dependency injection) so tests can mock it — no test should hit the real Anthropic API.
 - Model id for all Claude calls: `claude-sonnet-5`.
+- The Due/Upcoming panel uses a fixed 24-hour look-ahead window (entries due now, overdue, or due within the next 24 hours) — not just past-due (per spec's Reminders section).
+- Route handlers that take an `:id` param must reject a non-numeric id with 400 before touching the database.
+- `PATCH /api/entries/:id` must reject a `domain`/`type` value outside the allowed enums with 400.
+- Editing an entry's `raw_text`, `domain`, and `type` from the UI is a v1 requirement (per intent.md's "Correctable" goal) — not just delete.
 
 ---
 
@@ -593,6 +597,49 @@ describe('entries API', () => {
     expect(res.status).toBe(404);
   });
 
+  it('PATCH /api/entries/:id returns 400 for a non-numeric id', async () => {
+    const app = buildApp(db, mockClaude('{}') as never);
+    const res = await request(app).patch('/api/entries/not-a-number').send({ raw_text: 'x' });
+    expect(res.status).toBe(400);
+  });
+
+  it('PATCH /api/entries/:id returns 400 for an invalid domain', async () => {
+    const claude = mockClaude(JSON.stringify({ domain: 'personal', type: 'note', structured: {}, remind_at: null }));
+    const app = buildApp(db, claude as never);
+    const created = await request(app).post('/api/entries').send({ raw_text: 'note' });
+
+    const res = await request(app).patch(`/api/entries/${created.body.id}`).send({ domain: 'nonsense' });
+    expect(res.status).toBe(400);
+  });
+
+  it('PATCH /api/entries/:id returns 400 for an invalid type', async () => {
+    const claude = mockClaude(JSON.stringify({ domain: 'personal', type: 'note', structured: {}, remind_at: null }));
+    const app = buildApp(db, claude as never);
+    const created = await request(app).post('/api/entries').send({ raw_text: 'note' });
+
+    const res = await request(app).patch(`/api/entries/${created.body.id}`).send({ type: 'nonsense' });
+    expect(res.status).toBe(400);
+  });
+
+  it('PATCH /api/entries/:id allows editing raw_text, domain, and type together', async () => {
+    const claude = mockClaude(JSON.stringify({ domain: 'work', type: 'task', structured: {}, remind_at: null }));
+    const app = buildApp(db, claude as never);
+    const created = await request(app).post('/api/entries').send({ raw_text: 'miscategorized' });
+
+    const res = await request(app)
+      .patch(`/api/entries/${created.body.id}`)
+      .send({ raw_text: 'fixed text', domain: 'personal', type: 'note' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ raw_text: 'fixed text', domain: 'personal', type: 'note' });
+  });
+
+  it('DELETE /api/entries/:id returns 400 for a non-numeric id', async () => {
+    const app = buildApp(db, mockClaude('{}') as never);
+    const res = await request(app).delete('/api/entries/not-a-number');
+    expect(res.status).toBe(400);
+  });
+
   it('DELETE /api/entries/:id removes the entry', async () => {
     const claude = mockClaude(JSON.stringify({ domain: 'personal', type: 'note', structured: {}, remind_at: null }));
     const app = buildApp(db, claude as never);
@@ -617,7 +664,18 @@ import { Router } from 'express';
 import type Database from 'better-sqlite3';
 import type Anthropic from '@anthropic-ai/sdk';
 import { classifyEntry } from '../claude.js';
-import { createEntry, listEntries, listDueEntries, updateEntry, deleteEntry } from '../db.js';
+import {
+  createEntry, listEntries, listDueEntries, updateEntry, deleteEntry,
+  type Domain, type EntryType,
+} from '../db.js';
+
+const DOMAINS: Domain[] = ['work', 'finance', 'personal'];
+const TYPES: EntryType[] = ['task', 'expense', 'note', 'reminder', 'event'];
+
+function parseId(raw: string): number | undefined {
+  const id = Number(raw);
+  return Number.isInteger(id) ? id : undefined;
+}
 
 export function entriesRouter(db: Database.Database, claude: Pick<Anthropic, 'messages'>): Router {
   const router = Router();
@@ -652,14 +710,26 @@ export function entriesRouter(db: Database.Database, claude: Pick<Anthropic, 'me
   });
 
   router.patch('/:id', (req, res) => {
-    const id = Number(req.params.id);
-    const updated = updateEntry(db, id, req.body ?? {});
+    const id = parseId(req.params.id);
+    if (id === undefined) return res.status(400).json({ error: 'invalid id' });
+
+    const body = req.body ?? {};
+    if (body.domain !== undefined && !DOMAINS.includes(body.domain)) {
+      return res.status(400).json({ error: `domain must be one of ${DOMAINS.join(', ')}` });
+    }
+    if (body.type !== undefined && !TYPES.includes(body.type)) {
+      return res.status(400).json({ error: `type must be one of ${TYPES.join(', ')}` });
+    }
+
+    const updated = updateEntry(db, id, body);
     if (!updated) return res.status(404).json({ error: 'not found' });
     res.json(updated);
   });
 
   router.delete('/:id', (req, res) => {
-    const id = Number(req.params.id);
+    const id = parseId(req.params.id);
+    if (id === undefined) return res.status(400).json({ error: 'invalid id' });
+
     const ok = deleteEntry(db, id);
     if (!ok) return res.status(404).json({ error: 'not found' });
     res.status(204).send();
@@ -689,6 +759,7 @@ export function buildApp(db: Database.Database, claude: Pick<Anthropic, 'message
 
 ```ts
 import path from 'node:path';
+import express from 'express';
 import Anthropic from '@anthropic-ai/sdk';
 import { openDb } from './db.js';
 import { buildApp } from './app.js';
@@ -701,7 +772,7 @@ const claude = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const app = buildApp(db, claude);
 
 const clientDist = path.join(process.cwd(), '..', 'client', 'dist');
-app.use(require('express').static(clientDist));
+app.use(express.static(clientDist));
 app.get('*', (_req, res) => {
   res.sendFile(path.join(clientDist, 'index.html'));
 });
@@ -710,6 +781,8 @@ app.listen(PORT, () => {
   console.log(`genie server listening on http://localhost:${PORT}`);
 });
 ```
+
+(This is already the final version of `index.ts` — no further changes needed in later tasks. Task 4's `buildApp`/`index.ts` split means this file has no test coverage of its own, which is fine since `app.ts` carries all the logic tests exercise.)
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
@@ -1104,7 +1177,7 @@ git commit -m "chore: scaffold Vite + React client"
 
 **Interfaces:**
 - Consumes: `/api/entries` (Task 4).
-- Produces: `createEntry(rawText: string): Promise<Entry>`, `listEntries(): Promise<Entry[]>`, `deleteEntry(id: number): Promise<void>` in `client/src/api.ts` (also used by Task 8); `<CaptureBox onCaptured={(entry) => void}>`; `<EntryList entries={Entry[]} onDelete={(id) => void}>`.
+- Produces: `createEntry(rawText: string): Promise<Entry>`, `listEntries(): Promise<Entry[]>`, `deleteEntry(id: number): Promise<void>`, `updateEntry(id: number, fields): Promise<Entry>`, `DOMAINS`, `TYPES` in `client/src/api.ts` (also used by Task 8); `<CaptureBox onCaptured={(entry) => void}>`; `<EntryList entries={Entry[]} onDelete={(id) => void} onEdit={(id, fields) => void}>` — `onEdit` implements intent.md's "Correctable" requirement (edit raw_text/domain/type, not just delete).
 
 - [ ] **Step 1: Write failing tests for `CaptureBox` and `EntryList`**
 
@@ -1157,16 +1230,48 @@ const entry: Entry = {
 
 describe('EntryList', () => {
   it('renders each entry\'s text and domain/type', () => {
-    render(<EntryList entries={[entry]} onDelete={() => {}} />);
+    render(<EntryList entries={[entry]} onDelete={() => {}} onEdit={() => {}} />);
     expect(screen.getByText('buy milk')).toBeInTheDocument();
     expect(screen.getByText(/personal\/task/)).toBeInTheDocument();
   });
 
   it('calls onDelete with the entry id when delete is clicked', () => {
     const onDelete = vi.fn();
-    render(<EntryList entries={[entry]} onDelete={onDelete} />);
+    render(<EntryList entries={[entry]} onDelete={onDelete} onEdit={() => {}} />);
     fireEvent.click(screen.getByRole('button', { name: /delete/i }));
     expect(onDelete).toHaveBeenCalledWith(1);
+  });
+
+  it('clicking Edit reveals editable fields pre-filled with the entry\'s current values', () => {
+    render(<EntryList entries={[entry]} onDelete={() => {}} onEdit={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: /^edit$/i }));
+
+    expect(screen.getByDisplayValue('buy milk')).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: /domain/i })).toHaveValue('personal');
+    expect(screen.getByRole('combobox', { name: /type/i })).toHaveValue('task');
+  });
+
+  it('calls onEdit with the edited fields when Save is clicked', () => {
+    const onEdit = vi.fn();
+    render(<EntryList entries={[entry]} onDelete={() => {}} onEdit={onEdit} />);
+    fireEvent.click(screen.getByRole('button', { name: /^edit$/i }));
+
+    fireEvent.change(screen.getByDisplayValue('buy milk'), { target: { value: 'buy oat milk' } });
+    fireEvent.change(screen.getByRole('combobox', { name: /domain/i }), { target: { value: 'work' } });
+    fireEvent.change(screen.getByRole('combobox', { name: /type/i }), { target: { value: 'note' } });
+    fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+    expect(onEdit).toHaveBeenCalledWith(1, { raw_text: 'buy oat milk', domain: 'work', type: 'note' });
+  });
+
+  it('Cancel exits edit mode without calling onEdit', () => {
+    const onEdit = vi.fn();
+    render(<EntryList entries={[entry]} onDelete={() => {}} onEdit={onEdit} />);
+    fireEvent.click(screen.getByRole('button', { name: /^edit$/i }));
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
+
+    expect(onEdit).not.toHaveBeenCalled();
+    expect(screen.getByText('buy milk')).toBeInTheDocument();
   });
 });
 ```
@@ -1191,6 +1296,9 @@ export interface Entry {
   updated_at: string;
 }
 
+export const DOMAINS: Entry['domain'][] = ['work', 'finance', 'personal'];
+export const TYPES: Entry['type'][] = ['task', 'expense', 'note', 'reminder', 'event'];
+
 export async function createEntry(rawText: string): Promise<Entry> {
   const res = await fetch('/api/entries', {
     method: 'POST',
@@ -1207,8 +1315,11 @@ export async function listEntries(): Promise<Entry[]> {
   return res.json();
 }
 
+const DUE_WINDOW_HOURS = 24;
+
 export async function listDueEntries(): Promise<Entry[]> {
-  const res = await fetch(`/api/entries/due?before=${encodeURIComponent(new Date().toISOString())}`);
+  const cutoff = new Date(Date.now() + DUE_WINDOW_HOURS * 60 * 60 * 1000);
+  const res = await fetch(`/api/entries/due?before=${encodeURIComponent(cutoff.toISOString())}`);
   if (!res.ok) throw new Error(`failed to list due entries: ${res.status}`);
   return res.json();
 }
@@ -1216,6 +1327,19 @@ export async function listDueEntries(): Promise<Entry[]> {
 export async function deleteEntry(id: number): Promise<void> {
   const res = await fetch(`/api/entries/${id}`, { method: 'DELETE' });
   if (!res.ok) throw new Error(`failed to delete entry: ${res.status}`);
+}
+
+export async function updateEntry(
+  id: number,
+  fields: Pick<Entry, 'raw_text' | 'domain' | 'type'>
+): Promise<Entry> {
+  const res = await fetch(`/api/entries/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(fields),
+  });
+  if (!res.ok) throw new Error(`failed to update entry: ${res.status}`);
+  return res.json();
 }
 
 export async function askQuestion(question: string): Promise<{ answer: string; matched: number }> {
@@ -1268,16 +1392,71 @@ export default function CaptureBox({ onCaptured }: { onCaptured: (entry: Entry) 
 - [ ] **Step 5: Implement `client/src/EntryList.tsx`**
 
 ```tsx
-import type { Entry } from './api.js';
+import { useState } from 'react';
+import { DOMAINS, TYPES, type Entry } from './api.js';
 
-export default function EntryList({ entries, onDelete }: { entries: Entry[]; onDelete: (id: number) => void }) {
+type Draft = { raw_text: string; domain: Entry['domain']; type: Entry['type'] };
+
+export default function EntryList({
+  entries, onDelete, onEdit,
+}: {
+  entries: Entry[];
+  onDelete: (id: number) => void;
+  onEdit: (id: number, fields: Draft) => void;
+}) {
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [draft, setDraft] = useState<Draft | null>(null);
+
+  function startEdit(entry: Entry) {
+    setEditingId(entry.id);
+    setDraft({ raw_text: entry.raw_text, domain: entry.domain, type: entry.type });
+  }
+
+  function cancelEdit() {
+    setEditingId(null);
+    setDraft(null);
+  }
+
+  function saveEdit() {
+    if (editingId !== null && draft) onEdit(editingId, draft);
+    cancelEdit();
+  }
+
   return (
     <ul>
       {entries.map((entry) => (
         <li key={entry.id}>
-          <span>{entry.raw_text}</span>
-          <small> ({entry.domain}/{entry.type})</small>
-          <button onClick={() => onDelete(entry.id)}>Delete</button>
+          {editingId === entry.id && draft ? (
+            <>
+              <input
+                value={draft.raw_text}
+                onChange={(e) => setDraft({ ...draft, raw_text: e.target.value })}
+              />
+              <select
+                aria-label="domain"
+                value={draft.domain}
+                onChange={(e) => setDraft({ ...draft, domain: e.target.value as Entry['domain'] })}
+              >
+                {DOMAINS.map((d) => <option key={d} value={d}>{d}</option>)}
+              </select>
+              <select
+                aria-label="type"
+                value={draft.type}
+                onChange={(e) => setDraft({ ...draft, type: e.target.value as Entry['type'] })}
+              >
+                {TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+              </select>
+              <button onClick={saveEdit}>Save</button>
+              <button onClick={cancelEdit}>Cancel</button>
+            </>
+          ) : (
+            <>
+              <span>{entry.raw_text}</span>
+              <small> ({entry.domain}/{entry.type})</small>
+              <button onClick={() => startEdit(entry)}>Edit</button>
+              <button onClick={() => onDelete(entry.id)}>Delete</button>
+            </>
+          )}
         </li>
       ))}
     </ul>
@@ -1291,7 +1470,7 @@ export default function EntryList({ entries, onDelete }: { entries: Entry[]; onD
 import { useEffect, useState } from 'react';
 import CaptureBox from './CaptureBox.js';
 import EntryList from './EntryList.js';
-import { listEntries, deleteEntry, type Entry } from './api.js';
+import { listEntries, deleteEntry, updateEntry, type Entry } from './api.js';
 
 export default function App() {
   const [entries, setEntries] = useState<Entry[]>([]);
@@ -1309,6 +1488,10 @@ export default function App() {
         onDelete={async (id) => {
           await deleteEntry(id);
           setEntries((prev) => prev.filter((e) => e.id !== id));
+        }}
+        onEdit={async (id, fields) => {
+          const updated = await updateEntry(id, fields);
+          setEntries((prev) => prev.map((e) => (e.id === id ? updated : e)));
         }}
       />
     </div>
@@ -1531,14 +1714,14 @@ export default function DuePanel() {
 }
 ```
 
-- [ ] **Step 4: Mount it in `client/src/App.tsx`**
+- [ ] **Step 4: Mount it in `client/src/App.tsx`** (adds the `<DuePanel />` line to the Task 7 version of this file — everything else, including the `onEdit` wiring, is unchanged)
 
 ```tsx
 import { useEffect, useState } from 'react';
 import CaptureBox from './CaptureBox.js';
 import EntryList from './EntryList.js';
 import DuePanel from './DuePanel.js';
-import { listEntries, deleteEntry, type Entry } from './api.js';
+import { listEntries, deleteEntry, updateEntry, type Entry } from './api.js';
 
 export default function App() {
   const [entries, setEntries] = useState<Entry[]>([]);
@@ -1557,6 +1740,10 @@ export default function App() {
         onDelete={async (id) => {
           await deleteEntry(id);
           setEntries((prev) => prev.filter((e) => e.id !== id));
+        }}
+        onEdit={async (id, fields) => {
+          const updated = await updateEntry(id, fields);
+          setEntries((prev) => prev.map((e) => (e.id === id ? updated : e)));
         }}
       />
     </div>
@@ -1583,7 +1770,6 @@ git commit -m "feat: add due/upcoming panel"
 **Files:**
 - Create: `client/src/SearchBox.tsx`
 - Modify: `client/src/App.tsx`
-- Modify: `server/src/index.ts` — fix static-file serving to use a proper `express.static` import (cleanup from Task 4's `require()` placeholder)
 - Create: `README.md`
 - Test: `client/test/SearchBox.test.tsx`
 
@@ -1677,34 +1863,7 @@ import SearchBox from './SearchBox.js';
 Run: `npm run test --workspace=client`
 Expected: all tests PASS.
 
-- [ ] **Step 6: Clean up static-file serving in `server/src/index.ts`**
-
-```ts
-import path from 'node:path';
-import express from 'express';
-import Anthropic from '@anthropic-ai/sdk';
-import { openDb } from './db.js';
-import { buildApp } from './app.js';
-
-const PORT = process.env.PORT ? Number(process.env.PORT) : 3001;
-const DB_PATH = process.env.GENIE_DB_PATH ?? path.join(process.cwd(), 'genie.db');
-
-const db = openDb(DB_PATH);
-const claude = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-const app = buildApp(db, claude);
-
-const clientDist = path.join(process.cwd(), '..', 'client', 'dist');
-app.use(express.static(clientDist));
-app.get('*', (_req, res) => {
-  res.sendFile(path.join(clientDist, 'index.html'));
-});
-
-app.listen(PORT, () => {
-  console.log(`genie server listening on http://localhost:${PORT}`);
-});
-```
-
-- [ ] **Step 7: Write `README.md`**
+- [ ] **Step 6: Write `README.md`**
 
 ```markdown
 # Genie
@@ -1731,16 +1890,16 @@ API from a single Express process on :3001 (override with `PORT`).
 `npm test` runs both workspaces' test suites.
 ```
 
-- [ ] **Step 8: Run the full test suite from repo root**
+- [ ] **Step 7: Run the full test suite from repo root**
 
 Run: `npm test`
 Expected: all server and client tests PASS.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add client/src/SearchBox.tsx client/src/App.tsx client/test/SearchBox.test.tsx server/src/index.ts README.md
-git commit -m "feat: add search UI, finalize server static serving, add README"
+git add client/src/SearchBox.tsx client/src/App.tsx client/test/SearchBox.test.tsx README.md
+git commit -m "feat: add search UI, add README"
 ```
 
 ## End-to-end manual verification (after Task 10)
