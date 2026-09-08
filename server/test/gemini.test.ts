@@ -28,7 +28,7 @@ describe('classifyEntry', () => {
     });
     expect(client.models.generateContent).toHaveBeenCalledWith(
       expect.objectContaining({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-flash-lite-latest',
         contents: 'spent $42 on groceries',
       })
     );

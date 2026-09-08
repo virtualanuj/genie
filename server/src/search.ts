@@ -26,7 +26,7 @@ export async function answerQuestion(
     .map((e) => `- [${e.domain}/${e.type}] ${e.raw_text} (structured: ${e.structured}, created: ${e.created_at})`)
     .join('\n');
   const response = await client.models.generateContent({
-    model: 'gemini-2.5-flash',
+    model: 'gemini-flash-lite-latest',
     contents: `Entries:\n${context || '(none found)'}\n\nQuestion: ${question}`,
     config: { systemInstruction: ANSWER_SYSTEM_PROMPT },
   });

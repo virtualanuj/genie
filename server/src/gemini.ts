@@ -26,7 +26,7 @@ export async function classifyEntry(
 ): Promise<ClassifyResult> {
   const systemInstruction = CLASSIFY_SYSTEM_PROMPT.replace('{{today}}', new Date().toISOString().slice(0, 10));
   const response = await client.models.generateContent({
-    model: 'gemini-2.5-flash',
+    model: 'gemini-flash-lite-latest',
     contents: rawText,
     config: { systemInstruction },
   });

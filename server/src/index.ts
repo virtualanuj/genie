@@ -1,9 +1,15 @@
 import path from 'node:path';
 import { readFileSync } from 'node:fs';
+import { setDefaultResultOrder } from 'node:dns';
 import express from 'express';
 import { GoogleGenAI } from '@google/genai';
 import { openDb } from './db.js';
 import { buildApp } from './app.js';
+
+// Some environments resolve Gemini's API hostname to an IPv6 address that
+// then hangs indefinitely instead of erroring or falling back -- Node's
+// default DNS result order is IPv6-first. Preferring IPv4 avoids that hang.
+setDefaultResultOrder('ipv4first');
 
 function loadLocalProperties(filePath: string): void {
   let contents: string;

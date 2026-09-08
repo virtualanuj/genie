@@ -17,7 +17,7 @@
 - No push notifications, no external integrations, no multi-user auth in v1 (spec's out-of-scope list).
 - Voice input uses the browser's built-in Web Speech API — no external transcription service.
 - All Gemini API calls take the client as a parameter (dependency injection) so tests can mock it — no test should hit the real Gemini API.
-- Model id for all Gemini calls: `gemini-2.5-flash`.
+- Model id for all Gemini calls: `gemini-flash-lite-latest`.
 - The Due/Upcoming panel uses a fixed 24-hour look-ahead window (entries due now, overdue, or due within the next 24 hours) — not just past-due (per spec's Reminders section).
 - Route handlers that take an `:id` param must reject a non-numeric id with 400 before touching the database.
 - `PATCH /api/entries/:id` must reject a `domain`/`type` value outside the allowed enums with 400.
@@ -416,7 +416,7 @@ describe('classifyEntry', () => {
     });
     expect(client.models.generateContent).toHaveBeenCalledWith(
       expect.objectContaining({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-flash-lite-latest',
         contents: 'spent $42 on groceries',
       })
     );
@@ -471,7 +471,7 @@ export async function classifyEntry(
 ): Promise<ClassifyResult> {
   const systemInstruction = CLASSIFY_SYSTEM_PROMPT.replace('{{today}}', new Date().toISOString().slice(0, 10));
   const response = await client.models.generateContent({
-    model: 'gemini-2.5-flash',
+    model: 'gemini-flash-lite-latest',
     contents: rawText,
     config: { systemInstruction },
   });
@@ -909,7 +909,7 @@ export async function answerQuestion(
     .map((e) => `- [${e.domain}/${e.type}] ${e.raw_text} (structured: ${e.structured}, created: ${e.created_at})`)
     .join('\n');
   const response = await client.models.generateContent({
-    model: 'gemini-2.5-flash',
+    model: 'gemini-flash-lite-latest',
     contents: `Entries:\n${context || '(none found)'}\n\nQuestion: ${question}`,
     config: { systemInstruction: ANSWER_SYSTEM_PROMPT },
   });
