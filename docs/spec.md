@@ -19,7 +19,7 @@ Browser (capture UI, mic input)
 Node/TypeScript API (Express)
    │            │
    ▼            ▼
-SQLite      Claude API (classify/extract, Q&A)
+SQLite      Gemini API (classify/extract, Q&A)
 ```
 
 ## Data model
@@ -47,7 +47,7 @@ captured:
    external transcription service in v1 (revisit if accuracy is a
    problem).
 2. On submit, the raw text is sent to the backend, which calls the
-   Claude API with a prompt instructing it to return `domain`, `type`,
+   Gemini API with a prompt instructing it to return `domain`, `type`,
    and a `structured` JSON object matching the type.
 3. The entry is saved immediately (no confirmation step — nothing
    irreversible happens on save, matching the "organize + remind"
@@ -67,13 +67,13 @@ push notifications — the user sees this when the app is open.
 A search box takes a plain-language question. The backend does a
 first-pass filter over SQLite (by domain, date range, keyword match)
 to narrow candidate rows, then sends those rows plus the user's
-question to Claude, which synthesizes a direct answer.
+question to Gemini, which synthesizes a direct answer.
 
 **Known v1 limitation**: the first-pass filter matches on literal
 word overlap between the question and stored text/fields. A question
 using different vocabulary than what was captured (e.g. asking about
 "food" when an entry's category is "groceries") may fail to surface
-a relevant entry, since Claude only sees whatever passed the filter.
+a relevant entry, since Gemini only sees whatever passed the filter.
 Acceptable for v1; revisit with embedding-based or broader recall if
 it proves to be a real problem in practice.
 
@@ -83,8 +83,8 @@ it proves to be a real problem in practice.
 - Vite + React frontend
 - Express (or similarly thin) API layer
 - SQLite via `better-sqlite3`
-- Anthropic SDK for Claude API calls (classification/extraction and
-  Q&A synthesis)
+- Google's `@google/genai` SDK for Gemini API calls (classification/extraction
+  and Q&A synthesis)
 
 ## Out of scope for v1
 

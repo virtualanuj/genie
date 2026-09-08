@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a local-first web app where the user captures anything (text or voice) into one box, has it auto-classified/extracted by Claude and stored in SQLite, sees due reminders, and can ask natural-language questions over what's captured.
+**Goal:** Build a local-first web app where the user captures anything (text or voice) into one box, has it auto-classified/extracted by Gemini and stored in SQLite, sees due reminders, and can ask natural-language questions over what's captured.
 
-**Architecture:** An npm-workspaces monorepo with two packages: `server` (Express + TypeScript API backed by SQLite, calling the Claude API for classification and Q&A) and `client` (Vite + React frontend). In dev, Vite proxies `/api` to the Express server; in production, Express serves the built client.
+**Architecture:** An npm-workspaces monorepo with two packages: `server` (Express + TypeScript API backed by SQLite, calling the Gemini API for classification and Q&A) and `client` (Vite + React frontend). In dev, Vite proxies `/api` to the Express server; in production, Express serves the built client.
 
-**Tech Stack:** Node.js + TypeScript, Express, better-sqlite3, @anthropic-ai/sdk, Vite, React, Vitest (+ supertest for API tests, @testing-library/react for component tests).
+**Tech Stack:** Node.js + TypeScript, Express, better-sqlite3, @google/genai, Vite, React, Vitest (+ supertest for API tests, @testing-library/react for component tests).
 
 **Spec:** `docs/spec.md` (requirements: `docs/intent.md`)
 
@@ -16,8 +16,8 @@
 - No confirmation step before saving a captured entry (spec: "organize + remind" autonomy, nothing irreversible happens on save).
 - No push notifications, no external integrations, no multi-user auth in v1 (spec's out-of-scope list).
 - Voice input uses the browser's built-in Web Speech API — no external transcription service.
-- All Claude API calls take the client as a parameter (dependency injection) so tests can mock it — no test should hit the real Anthropic API.
-- Model id for all Claude calls: `claude-sonnet-5`.
+- All Gemini API calls take the client as a parameter (dependency injection) so tests can mock it — no test should hit the real Gemini API.
+- Model id for all Gemini calls: `gemini-2.5-flash`.
 - The Due/Upcoming panel uses a fixed 24-hour look-ahead window (entries due now, overdue, or due within the next 24 hours) — not just past-due (per spec's Reminders section).
 - Route handlers that take an `:id` param must reject a non-numeric id with 400 before touching the database.
 - `PATCH /api/entries/:id` must reject a `domain`/`type` value outside the allowed enums with 400.
@@ -81,7 +81,7 @@ dist/
     "test": "vitest run"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.32.0",
+    "@google/genai": "^1.0.0",
     "better-sqlite3": "^11.3.0",
     "express": "^4.21.0"
   },
@@ -372,29 +372,27 @@ git commit -m "feat: add SQLite data access layer for entries"
 
 ---
 
-### Task 3: Claude classification module
+### Task 3: Gemini classification module
 
 **Files:**
-- Create: `server/src/claude.ts`
-- Test: `server/test/claude.test.ts`
+- Create: `server/src/gemini.ts`
+- Test: `server/test/gemini.test.ts`
 
 **Interfaces:**
 - Consumes: `Domain`, `EntryType` from `server/src/db.ts` (Task 2).
-- Produces: `classifyEntry(client: Pick<Anthropic, 'messages'>, rawText: string): Promise<{ domain: Domain; type: EntryType; structured: Record<string, unknown>; remind_at: string | null }>` — used by Task 4's capture route.
+- Produces: `classifyEntry(client: Pick<GoogleGenAI, 'models'>, rawText: string): Promise<{ domain: Domain; type: EntryType; structured: Record<string, unknown>; remind_at: string | null }>` — used by Task 4's capture route.
 
-- [ ] **Step 1: Write failing tests with a mocked Claude client**
+- [ ] **Step 1: Write failing tests with a mocked Gemini client**
 
-`server/test/claude.test.ts`:
+`server/test/gemini.test.ts`:
 ```ts
 import { describe, it, expect, vi } from 'vitest';
-import { classifyEntry } from '../src/claude.js';
+import { classifyEntry } from '../src/gemini.js';
 
-function mockClient(responseText: string) {
+function mockClient(responseText: string | undefined) {
   return {
-    messages: {
-      create: vi.fn().mockResolvedValue({
-        content: [{ type: 'text', text: responseText }],
-      }),
+    models: {
+      generateContent: vi.fn().mockResolvedValue({ text: responseText }),
     },
   };
 }
@@ -416,10 +414,10 @@ describe('classifyEntry', () => {
       structured: { amount: 42, currency: 'USD', category: 'groceries' },
       remind_at: null,
     });
-    expect(client.messages.create).toHaveBeenCalledWith(
+    expect(client.models.generateContent).toHaveBeenCalledWith(
       expect.objectContaining({
-        model: 'claude-sonnet-5',
-        messages: [{ role: 'user', content: 'spent $42 on groceries' }],
+        model: 'gemini-2.5-flash',
+        contents: 'spent $42 on groceries',
       })
     );
   });
@@ -431,7 +429,7 @@ describe('classifyEntry', () => {
   });
 
   it('throws when the response has no text content', async () => {
-    const client = { messages: { create: vi.fn().mockResolvedValue({ content: [] }) } };
+    const client = mockClient(undefined);
     await expect(classifyEntry(client, 'x')).rejects.toThrow('no text content');
   });
 });
@@ -440,12 +438,12 @@ describe('classifyEntry', () => {
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `npm run test --workspace=server`
-Expected: FAIL — `../src/claude.js` does not exist.
+Expected: FAIL — `../src/gemini.js` does not exist.
 
-- [ ] **Step 3: Implement `server/src/claude.ts`**
+- [ ] **Step 3: Implement `server/src/gemini.ts`**
 
 ```ts
-import type Anthropic from '@anthropic-ai/sdk';
+import type { GoogleGenAI } from '@google/genai';
 import type { Domain, EntryType } from './db.js';
 
 export interface ClassifyResult {
@@ -468,23 +466,19 @@ Respond with ONLY a JSON object, no other text, matching this shape:
 Today's date is {{today}}.`;
 
 export async function classifyEntry(
-  client: Pick<Anthropic, 'messages'>,
+  client: Pick<GoogleGenAI, 'models'>,
   rawText: string
 ): Promise<ClassifyResult> {
-  const system = CLASSIFY_SYSTEM_PROMPT.replace('{{today}}', new Date().toISOString().slice(0, 10));
-  const response = await client.messages.create({
-    model: 'claude-sonnet-5',
-    max_tokens: 500,
-    system,
-    messages: [{ role: 'user', content: rawText }],
+  const systemInstruction = CLASSIFY_SYSTEM_PROMPT.replace('{{today}}', new Date().toISOString().slice(0, 10));
+  const response = await client.models.generateContent({
+    model: 'gemini-2.5-flash',
+    contents: rawText,
+    config: { systemInstruction },
   });
 
-  const textBlock = response.content.find((b: { type: string }) => b.type === 'text') as
-    | { type: 'text'; text: string }
-    | undefined;
-  if (!textBlock) throw new Error('Claude response had no text content');
+  if (!response.text) throw new Error('Gemini response had no text content');
 
-  const parsed = JSON.parse(textBlock.text);
+  const parsed = JSON.parse(response.text);
   return {
     domain: parsed.domain,
     type: parsed.type,
@@ -497,13 +491,13 @@ export async function classifyEntry(
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `npm run test --workspace=server`
-Expected: all `claude.test.ts` tests PASS.
+Expected: all `gemini.test.ts` tests PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add server/src/claude.ts server/test/claude.test.ts
-git commit -m "feat: add Claude classification module"
+git add server/src/gemini.ts server/test/gemini.test.ts
+git commit -m "feat: add Gemini classification module"
 ```
 
 ---
@@ -518,9 +512,9 @@ git commit -m "feat: add Claude classification module"
 
 **Interfaces:**
 - Consumes: `openDb`, `createEntry`, `listEntries`, `listDueEntries`, `updateEntry`, `deleteEntry` (Task 2); `classifyEntry` (Task 3).
-- Produces: `entriesRouter(db, claude): Router` mounted at `/api/entries`; `buildApp(db, claude): express.Express` (used by Task 5's search route wiring and by `index.ts`) — both reused by later tasks/tests.
+- Produces: `entriesRouter(db, gemini): Router` mounted at `/api/entries`; `buildApp(db, gemini): express.Express` (used by Task 5's search route wiring and by `index.ts`) — both reused by later tasks/tests.
 
-- [ ] **Step 1: Write failing route tests with an in-memory DB and mocked Claude client**
+- [ ] **Step 1: Write failing route tests with an in-memory DB and mocked Gemini client**
 
 `server/test/entries.route.test.ts`:
 ```ts
@@ -529,8 +523,8 @@ import request from 'supertest';
 import { openDb } from '../src/db.js';
 import { buildApp } from '../src/app.js';
 
-function mockClaude(responseText: string) {
-  return { messages: { create: vi.fn().mockResolvedValue({ content: [{ type: 'text', text: responseText }] }) } };
+function mockGemini(responseText: string) {
+  return { models: { generateContent: vi.fn().mockResolvedValue({ text: responseText }) } };
 }
 
 describe('entries API', () => {
@@ -541,10 +535,10 @@ describe('entries API', () => {
   });
 
   it('POST /api/entries classifies and saves a new entry', async () => {
-    const claude = mockClaude(JSON.stringify({
+    const gemini = mockGemini(JSON.stringify({
       domain: 'work', type: 'task', structured: { project: 'genie' }, remind_at: null,
     }));
-    const app = buildApp(db, claude as never);
+    const app = buildApp(db, gemini as never);
 
     const res = await request(app).post('/api/entries').send({ raw_text: 'finish the genie plan' });
 
@@ -554,14 +548,14 @@ describe('entries API', () => {
   });
 
   it('POST /api/entries rejects empty raw_text', async () => {
-    const app = buildApp(db, mockClaude('{}') as never);
+    const app = buildApp(db, mockGemini('{}') as never);
     const res = await request(app).post('/api/entries').send({ raw_text: '  ' });
     expect(res.status).toBe(400);
   });
 
   it('GET /api/entries lists saved entries', async () => {
-    const claude = mockClaude(JSON.stringify({ domain: 'personal', type: 'note', structured: {}, remind_at: null }));
-    const app = buildApp(db, claude as never);
+    const gemini = mockGemini(JSON.stringify({ domain: 'personal', type: 'note', structured: {}, remind_at: null }));
+    const app = buildApp(db, gemini as never);
     await request(app).post('/api/entries').send({ raw_text: 'note one' });
 
     const res = await request(app).get('/api/entries');
@@ -570,10 +564,10 @@ describe('entries API', () => {
   });
 
   it('GET /api/entries/due filters by remind_at', async () => {
-    const claude = mockClaude(JSON.stringify({
+    const gemini = mockGemini(JSON.stringify({
       domain: 'work', type: 'task', structured: {}, remind_at: '2020-01-01T00:00:00.000Z',
     }));
-    const app = buildApp(db, claude as never);
+    const app = buildApp(db, gemini as never);
     await request(app).post('/api/entries').send({ raw_text: 'overdue task' });
 
     const res = await request(app).get('/api/entries/due').query({ before: '2020-06-01T00:00:00.000Z' });
@@ -582,8 +576,8 @@ describe('entries API', () => {
   });
 
   it('PATCH /api/entries/:id updates fields', async () => {
-    const claude = mockClaude(JSON.stringify({ domain: 'personal', type: 'note', structured: {}, remind_at: null }));
-    const app = buildApp(db, claude as never);
+    const gemini = mockGemini(JSON.stringify({ domain: 'personal', type: 'note', structured: {}, remind_at: null }));
+    const app = buildApp(db, gemini as never);
     const created = await request(app).post('/api/entries').send({ raw_text: 'wrong text' });
 
     const res = await request(app).patch(`/api/entries/${created.body.id}`).send({ raw_text: 'right text' });
@@ -592,20 +586,20 @@ describe('entries API', () => {
   });
 
   it('PATCH /api/entries/:id returns 404 for missing entry', async () => {
-    const app = buildApp(db, mockClaude('{}') as never);
+    const app = buildApp(db, mockGemini('{}') as never);
     const res = await request(app).patch('/api/entries/999').send({ raw_text: 'x' });
     expect(res.status).toBe(404);
   });
 
   it('PATCH /api/entries/:id returns 400 for a non-numeric id', async () => {
-    const app = buildApp(db, mockClaude('{}') as never);
+    const app = buildApp(db, mockGemini('{}') as never);
     const res = await request(app).patch('/api/entries/not-a-number').send({ raw_text: 'x' });
     expect(res.status).toBe(400);
   });
 
   it('PATCH /api/entries/:id returns 400 for an invalid domain', async () => {
-    const claude = mockClaude(JSON.stringify({ domain: 'personal', type: 'note', structured: {}, remind_at: null }));
-    const app = buildApp(db, claude as never);
+    const gemini = mockGemini(JSON.stringify({ domain: 'personal', type: 'note', structured: {}, remind_at: null }));
+    const app = buildApp(db, gemini as never);
     const created = await request(app).post('/api/entries').send({ raw_text: 'note' });
 
     const res = await request(app).patch(`/api/entries/${created.body.id}`).send({ domain: 'nonsense' });
@@ -613,8 +607,8 @@ describe('entries API', () => {
   });
 
   it('PATCH /api/entries/:id returns 400 for an invalid type', async () => {
-    const claude = mockClaude(JSON.stringify({ domain: 'personal', type: 'note', structured: {}, remind_at: null }));
-    const app = buildApp(db, claude as never);
+    const gemini = mockGemini(JSON.stringify({ domain: 'personal', type: 'note', structured: {}, remind_at: null }));
+    const app = buildApp(db, gemini as never);
     const created = await request(app).post('/api/entries').send({ raw_text: 'note' });
 
     const res = await request(app).patch(`/api/entries/${created.body.id}`).send({ type: 'nonsense' });
@@ -622,8 +616,8 @@ describe('entries API', () => {
   });
 
   it('PATCH /api/entries/:id allows editing raw_text, domain, and type together', async () => {
-    const claude = mockClaude(JSON.stringify({ domain: 'work', type: 'task', structured: {}, remind_at: null }));
-    const app = buildApp(db, claude as never);
+    const gemini = mockGemini(JSON.stringify({ domain: 'work', type: 'task', structured: {}, remind_at: null }));
+    const app = buildApp(db, gemini as never);
     const created = await request(app).post('/api/entries').send({ raw_text: 'miscategorized' });
 
     const res = await request(app)
@@ -635,14 +629,14 @@ describe('entries API', () => {
   });
 
   it('DELETE /api/entries/:id returns 400 for a non-numeric id', async () => {
-    const app = buildApp(db, mockClaude('{}') as never);
+    const app = buildApp(db, mockGemini('{}') as never);
     const res = await request(app).delete('/api/entries/not-a-number');
     expect(res.status).toBe(400);
   });
 
   it('DELETE /api/entries/:id removes the entry', async () => {
-    const claude = mockClaude(JSON.stringify({ domain: 'personal', type: 'note', structured: {}, remind_at: null }));
-    const app = buildApp(db, claude as never);
+    const gemini = mockGemini(JSON.stringify({ domain: 'personal', type: 'note', structured: {}, remind_at: null }));
+    const app = buildApp(db, gemini as never);
     const created = await request(app).post('/api/entries').send({ raw_text: 'delete me' });
 
     const res = await request(app).delete(`/api/entries/${created.body.id}`);
@@ -662,8 +656,8 @@ Expected: FAIL — `../src/app.js` does not exist.
 ```ts
 import { Router } from 'express';
 import type Database from 'better-sqlite3';
-import type Anthropic from '@anthropic-ai/sdk';
-import { classifyEntry } from '../claude.js';
+import type { GoogleGenAI } from '@google/genai';
+import { classifyEntry } from '../gemini.js';
 import {
   createEntry, listEntries, listDueEntries, updateEntry, deleteEntry,
   type Domain, type EntryType,
@@ -677,7 +671,7 @@ function parseId(raw: string): number | undefined {
   return Number.isInteger(id) ? id : undefined;
 }
 
-export function entriesRouter(db: Database.Database, claude: Pick<Anthropic, 'messages'>): Router {
+export function entriesRouter(db: Database.Database, gemini: Pick<GoogleGenAI, 'models'>): Router {
   const router = Router();
 
   router.post('/', async (req, res) => {
@@ -686,7 +680,7 @@ export function entriesRouter(db: Database.Database, claude: Pick<Anthropic, 'me
       return res.status(400).json({ error: 'raw_text is required' });
     }
     try {
-      const classified = await classifyEntry(claude, rawText);
+      const classified = await classifyEntry(gemini, rawText);
       const entry = createEntry(db, {
         raw_text: rawText,
         domain: classified.domain,
@@ -744,13 +738,13 @@ export function entriesRouter(db: Database.Database, claude: Pick<Anthropic, 'me
 ```ts
 import express from 'express';
 import type Database from 'better-sqlite3';
-import type Anthropic from '@anthropic-ai/sdk';
+import type { GoogleGenAI } from '@google/genai';
 import { entriesRouter } from './routes/entries.js';
 
-export function buildApp(db: Database.Database, claude: Pick<Anthropic, 'messages'>): express.Express {
+export function buildApp(db: Database.Database, gemini: Pick<GoogleGenAI, 'models'>): express.Express {
   const app = express();
   app.use(express.json());
-  app.use('/api/entries', entriesRouter(db, claude));
+  app.use('/api/entries', entriesRouter(db, gemini));
   return app;
 }
 ```
@@ -760,7 +754,7 @@ export function buildApp(db: Database.Database, claude: Pick<Anthropic, 'message
 ```ts
 import path from 'node:path';
 import express from 'express';
-import Anthropic from '@anthropic-ai/sdk';
+import { GoogleGenAI } from '@google/genai';
 import { openDb } from './db.js';
 import { buildApp } from './app.js';
 
@@ -768,8 +762,8 @@ const PORT = process.env.PORT ? Number(process.env.PORT) : 3001;
 const DB_PATH = process.env.GENIE_DB_PATH ?? path.join(process.cwd(), 'genie.db');
 
 const db = openDb(DB_PATH);
-const claude = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-const app = buildApp(db, claude);
+const gemini = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+const app = buildApp(db, gemini);
 
 const clientDist = path.join(process.cwd(), '..', 'client', 'dist');
 app.use(express.static(clientDist));
@@ -809,7 +803,7 @@ git commit -m "feat: add entries capture/list/due/update/delete API"
 
 **Interfaces:**
 - Consumes: `Entry`, `listEntries` (Task 2).
-- Produces: `filterCandidates(entries: Entry[], query: string, limit?: number): Entry[]`, `answerQuestion(client, question: string, candidates: Entry[]): Promise<string>`, `searchRouter(db, claude): Router` mounted at `/api/search`.
+- Produces: `filterCandidates(entries: Entry[], query: string, limit?: number): Entry[]`, `answerQuestion(client, question: string, candidates: Entry[]): Promise<string>`, `searchRouter(db, gemini): Router` mounted at `/api/search`.
 
 - [ ] **Step 1: Write failing tests for `filterCandidates` and `answerQuestion`**
 
@@ -842,11 +836,11 @@ describe('filterCandidates', () => {
 });
 
 describe('answerQuestion', () => {
-  it('sends candidate entries and the question to Claude and returns the text', async () => {
-    const client = { messages: { create: vi.fn().mockResolvedValue({ content: [{ type: 'text', text: 'You spent $50.' }] }) } };
+  it('sends candidate entries and the question to Gemini and returns the text', async () => {
+    const client = { models: { generateContent: vi.fn().mockResolvedValue({ text: 'You spent $50.' }) } };
     const answer = await answerQuestion(client as never, 'how much on groceries?', [entry({ raw_text: 'bought groceries for $50' })]);
     expect(answer).toBe('You spent $50.');
-    expect(client.messages.create).toHaveBeenCalled();
+    expect(client.models.generateContent).toHaveBeenCalled();
   });
 });
 ```
@@ -862,9 +856,9 @@ describe('search API', () => {
   it('POST /api/search returns a synthesized answer', async () => {
     const db = openDb(':memory:');
     createEntry(db, { raw_text: 'bought groceries for $50', domain: 'finance', type: 'expense', structured: { amount: 50 } });
-    const claude = { messages: { create: vi.fn().mockResolvedValue({ content: [{ type: 'text', text: 'You spent $50 on groceries.' }] }) } };
+    const gemini = { models: { generateContent: vi.fn().mockResolvedValue({ text: 'You spent $50 on groceries.' }) } };
 
-    const app = buildApp(db, claude as never);
+    const app = buildApp(db, gemini as never);
     const res = await request(app).post('/api/search').send({ question: 'how much on groceries?' });
 
     expect(res.status).toBe(200);
@@ -872,7 +866,7 @@ describe('search API', () => {
   });
 
   it('POST /api/search rejects an empty question', async () => {
-    const app = buildApp(openDb(':memory:'), { messages: { create: vi.fn() } } as never);
+    const app = buildApp(openDb(':memory:'), { models: { generateContent: vi.fn() } } as never);
     const res = await request(app).post('/api/search').send({ question: '' });
     expect(res.status).toBe(400);
   });
@@ -887,7 +881,7 @@ Expected: FAIL — `../src/search.js` and `../src/routes/search.js` do not exist
 - [ ] **Step 3: Implement `server/src/search.ts`**
 
 ```ts
-import type Anthropic from '@anthropic-ai/sdk';
+import type { GoogleGenAI } from '@google/genai';
 import type { Entry } from './db.js';
 
 export function filterCandidates(entries: Entry[], query: string, limit = 30): Entry[] {
@@ -907,23 +901,19 @@ export function filterCandidates(entries: Entry[], query: string, limit = 30): E
 const ANSWER_SYSTEM_PROMPT = `You are a personal assistant answering questions about the user's own notes, tasks, and expenses. Use only the provided entries as ground truth — do not invent details. If nothing relevant is present, say so plainly.`;
 
 export async function answerQuestion(
-  client: Pick<Anthropic, 'messages'>,
+  client: Pick<GoogleGenAI, 'models'>,
   question: string,
   candidates: Entry[]
 ): Promise<string> {
   const context = candidates
     .map((e) => `- [${e.domain}/${e.type}] ${e.raw_text} (structured: ${e.structured}, created: ${e.created_at})`)
     .join('\n');
-  const response = await client.messages.create({
-    model: 'claude-sonnet-5',
-    max_tokens: 500,
-    system: ANSWER_SYSTEM_PROMPT,
-    messages: [{ role: 'user', content: `Entries:\n${context || '(none found)'}\n\nQuestion: ${question}` }],
+  const response = await client.models.generateContent({
+    model: 'gemini-2.5-flash',
+    contents: `Entries:\n${context || '(none found)'}\n\nQuestion: ${question}`,
+    config: { systemInstruction: ANSWER_SYSTEM_PROMPT },
   });
-  const textBlock = response.content.find((b: { type: string }) => b.type === 'text') as
-    | { type: 'text'; text: string }
-    | undefined;
-  return textBlock?.text ?? '';
+  return response.text ?? '';
 }
 ```
 
@@ -932,11 +922,11 @@ export async function answerQuestion(
 ```ts
 import { Router } from 'express';
 import type Database from 'better-sqlite3';
-import type Anthropic from '@anthropic-ai/sdk';
+import type { GoogleGenAI } from '@google/genai';
 import { listEntries } from '../db.js';
 import { filterCandidates, answerQuestion } from '../search.js';
 
-export function searchRouter(db: Database.Database, claude: Pick<Anthropic, 'messages'>): Router {
+export function searchRouter(db: Database.Database, gemini: Pick<GoogleGenAI, 'models'>): Router {
   const router = Router();
   router.post('/', async (req, res) => {
     const question = req.body?.question;
@@ -945,7 +935,7 @@ export function searchRouter(db: Database.Database, claude: Pick<Anthropic, 'mes
     }
     const candidates = filterCandidates(listEntries(db, 500), question);
     try {
-      const answer = await answerQuestion(claude, question, candidates);
+      const answer = await answerQuestion(gemini, question, candidates);
       res.json({ answer, matched: candidates.length });
     } catch (err) {
       res.status(502).json({ error: 'search failed', detail: (err as Error).message });
@@ -960,15 +950,15 @@ export function searchRouter(db: Database.Database, claude: Pick<Anthropic, 'mes
 ```ts
 import express from 'express';
 import type Database from 'better-sqlite3';
-import type Anthropic from '@anthropic-ai/sdk';
+import type { GoogleGenAI } from '@google/genai';
 import { entriesRouter } from './routes/entries.js';
 import { searchRouter } from './routes/search.js';
 
-export function buildApp(db: Database.Database, claude: Pick<Anthropic, 'messages'>): express.Express {
+export function buildApp(db: Database.Database, gemini: Pick<GoogleGenAI, 'models'>): express.Express {
   const app = express();
   app.use(express.json());
-  app.use('/api/entries', entriesRouter(db, claude));
-  app.use('/api/search', searchRouter(db, claude));
+  app.use('/api/entries', entriesRouter(db, gemini));
+  app.use('/api/search', searchRouter(db, gemini));
   return app;
 }
 ```
@@ -1875,8 +1865,10 @@ searchable. See `docs/intent.md` and `docs/spec.md` for the full design.
 ## Setup
 
 1. `npm install`
-2. Set `ANTHROPIC_API_KEY` in your environment (or a `.env` file loaded
-   by your shell) — used for classification and search.
+2. Get a Gemini API key from [Google AI Studio](https://aistudio.google.com/apikey)
+   (free tier available) and set `GEMINI_API_KEY` in your environment
+   (or a `.env` file loaded by your shell) — used for classification
+   and search.
 3. `npm run dev` — starts the API on :3001 and the Vite dev server
    (proxying `/api` to it) on :5173.
 
