@@ -461,3 +461,29 @@ select {
   font-size: 13px;
   cursor: default;
 }
+
+.filter-pills {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.filter-pill {
+  background: none;
+  border: 1px solid var(--hairline);
+  color: var(--text-muted);
+  font-size: 12.5px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.filter-pill:hover {
+  color: var(--text);
+}
+
+.filter-pill.active {
+  background: var(--surface-raised);
+  border-color: var(--accent-ring);
+  color: var(--text);
+}

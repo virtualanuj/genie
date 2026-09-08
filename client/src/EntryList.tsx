@@ -13,6 +13,18 @@ function recurrenceLabel(entry: Entry): string | null {
   }
 }
 
+const DOMAIN_FILTERS = ['all', ...DOMAINS] as const;
+type DomainFilter = (typeof DOMAIN_FILTERS)[number];
+
+function sortByDueThenRecent(entries: Entry[]): Entry[] {
+  return [...entries].sort((a, b) => {
+    if (a.remind_at && b.remind_at) return a.remind_at < b.remind_at ? -1 : a.remind_at > b.remind_at ? 1 : 0;
+    if (a.remind_at && !b.remind_at) return -1;
+    if (!a.remind_at && b.remind_at) return 1;
+    return a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0;
+  });
+}
+
 export default function EntryList({
   entries, onDelete, onEdit,
 }: {
@@ -22,6 +34,7 @@ export default function EntryList({
 }) {
   const [editingId, setEditingId] = useState<number | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
+  const [filter, setFilter] = useState<DomainFilter>('all');
 
   function startEdit(entry: Entry) {
     setEditingId(entry.id);
@@ -47,9 +60,27 @@ export default function EntryList({
     return <p className="empty-note">Nothing captured yet — try the box above.</p>;
   }
 
+  const filtered = filter === 'all' ? entries : entries.filter((e) => e.domain === filter);
+  const visible = sortByDueThenRecent(filtered);
+
   return (
-    <ul className="entry-list">
-      {entries.map((entry) => {
+    <>
+      <div className="filter-pills">
+        {DOMAIN_FILTERS.map((f) => (
+          <button
+            key={f}
+            className={`filter-pill${filter === f ? ' active' : ''}`}
+            onClick={() => setFilter(f)}
+          >
+            {f === 'all' ? 'All' : f[0].toUpperCase() + f.slice(1)}
+          </button>
+        ))}
+      </div>
+      {visible.length === 0 ? (
+        <p className="empty-note">No entries match this filter.</p>
+      ) : (
+        <ul className="entry-list">
+          {visible.map((entry) => {
         const label = recurrenceLabel(entry);
         return (
           <li key={entry.id} className="entry-row">
@@ -110,7 +141,9 @@ export default function EntryList({
             )}
           </li>
         );
-      })}
-    </ul>
+          })}
+        </ul>
+      )}
+    </>
   );
 }

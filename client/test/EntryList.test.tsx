@@ -89,4 +89,35 @@ describe('EntryList', () => {
 
     expect(onEdit).toHaveBeenCalledWith(2, expect.objectContaining({ recurrence: null }));
   });
+
+  it('filters entries by domain when a filter pill is clicked', () => {
+    const workEntry: Entry = { ...entry, id: 3, domain: 'work', raw_text: 'write report' };
+    render(<EntryList entries={[entry, workEntry]} onDelete={() => {}} onEdit={() => {}} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /^work$/i }));
+
+    expect(screen.getByText('write report')).toBeInTheDocument();
+    expect(screen.queryByText('buy milk')).not.toBeInTheDocument();
+  });
+
+  it('shows all entries again when All is selected', () => {
+    const workEntry: Entry = { ...entry, id: 3, domain: 'work', raw_text: 'write report' };
+    render(<EntryList entries={[entry, workEntry]} onDelete={() => {}} onEdit={() => {}} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /^work$/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^all$/i }));
+
+    expect(screen.getByText('buy milk')).toBeInTheDocument();
+    expect(screen.getByText('write report')).toBeInTheDocument();
+  });
+
+  it('sorts entries with a due date ascending before entries without one', () => {
+    const soon: Entry = { ...entry, id: 4, raw_text: 'soon-task', remind_at: '2020-01-01T00:00:00.000Z' };
+    const later: Entry = { ...entry, id: 5, raw_text: 'later-task', remind_at: '2020-06-01T00:00:00.000Z' };
+    const noDue: Entry = { ...entry, id: 6, raw_text: 'someday-task', remind_at: null };
+    render(<EntryList entries={[noDue, later, soon]} onDelete={() => {}} onEdit={() => {}} />);
+
+    const texts = screen.getAllByText(/-task/).map((el) => el.textContent);
+    expect(texts).toEqual(['soon-task', 'later-task', 'someday-task']);
+  });
 });
