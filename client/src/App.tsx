@@ -27,9 +27,7 @@ export default function App() {
         }}
       />
 
-      <div className="section">
-        <DuePanel refreshKey={dueRefreshKey} />
-      </div>
+      <DuePanel refreshKey={dueRefreshKey} />
 
       <section className="section">
         <h2 className="section-title">
