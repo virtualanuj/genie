@@ -8,8 +8,10 @@ searchable. See `docs/intent.md` and `docs/spec.md` for the full design.
 
 1. `npm install`
 2. Get a Gemini API key from [Google AI Studio](https://aistudio.google.com/apikey)
-   (free tier available) and set `GEMINI_API_KEY` in your environment
-   (or a `.env` file loaded by your shell) — used for classification
+   (free tier available) and either set `GEMINI_API_KEY` in your shell
+   environment, or put `GEMINI_API_KEY=<your key>` in a `local.properties`
+   file at the repo root (gitignored, loaded automatically by the server
+   on startup if the env var isn't already set). Used for classification
    and search.
 3. `npm run dev` — starts the API on :3001 and the Vite dev server
    (proxying `/api` to it) on :5173.
