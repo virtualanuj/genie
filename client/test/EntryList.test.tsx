@@ -15,10 +15,11 @@ const recurringEntry: Entry = {
 };
 
 describe('EntryList', () => {
-  it('renders each entry\'s text and domain/type', () => {
+  it('renders each entry\'s text and a colored domain tag', () => {
     render(<EntryList entries={[entry]} onDelete={() => {}} onEdit={() => {}} />);
     expect(screen.getByText('buy milk')).toBeInTheDocument();
-    expect(screen.getByText(/personal\/task/)).toBeInTheDocument();
+    expect(screen.getByText('personal')).toHaveClass('domain-personal');
+    expect(screen.getByText('task')).toBeInTheDocument();
   });
 
   it('calls onDelete with the entry id when delete is clicked', () => {
@@ -119,5 +120,33 @@ describe('EntryList', () => {
 
     const texts = screen.getAllByText(/-task/).map((el) => el.textContent);
     expect(texts).toEqual(['soon-task', 'later-task', 'someday-task']);
+  });
+
+  it('gives each domain a distinctly colored tag class', () => {
+    const workEntry: Entry = { ...entry, id: 3, domain: 'work', raw_text: 'write report' };
+    const financeEntry: Entry = { ...entry, id: 4, domain: 'finance', raw_text: 'pay rent' };
+    render(<EntryList entries={[entry, workEntry, financeEntry]} onDelete={() => {}} onEdit={() => {}} />);
+
+    expect(screen.getByText('personal')).toHaveClass('domain-personal');
+    expect(screen.getByText('work')).toHaveClass('domain-work');
+    expect(screen.getByText('finance')).toHaveClass('domain-finance');
+  });
+
+  it('defaults to list layout and can switch to card layout', () => {
+    render(<EntryList entries={[entry]} onDelete={() => {}} onEdit={() => {}} />);
+
+    expect(document.querySelector('.entry-list')).toBeInTheDocument();
+    expect(document.querySelector('.entry-cards')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /card view/i }));
+
+    expect(document.querySelector('.entry-cards')).toBeInTheDocument();
+    expect(document.querySelector('.entry-list')).not.toBeInTheDocument();
+    expect(screen.getByText('buy milk')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /list view/i }));
+
+    expect(document.querySelector('.entry-list')).toBeInTheDocument();
+    expect(document.querySelector('.entry-cards')).not.toBeInTheDocument();
   });
 });

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { DOMAINS, TYPES, RECURRENCE_FREQS, type Entry, type Recurrence } from './api.js';
 
 type Draft = { raw_text: string; domain: Entry['domain']; type: Entry['type']; recurrence: Recurrence | null };
+type ViewMode = 'list' | 'card';
 
 function recurrenceLabel(entry: Entry): string | null {
   if (!entry.recurrence) return null;
@@ -35,6 +36,7 @@ export default function EntryList({
   const [editingId, setEditingId] = useState<number | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [filter, setFilter] = useState<DomainFilter>('all');
+  const [view, setView] = useState<ViewMode>('list');
 
   function startEdit(entry: Entry) {
     setEditingId(entry.id);
@@ -65,82 +67,104 @@ export default function EntryList({
 
   return (
     <>
-      <div className="filter-pills">
-        {DOMAIN_FILTERS.map((f) => (
+      <div className="list-controls">
+        <div className="filter-pills">
+          {DOMAIN_FILTERS.map((f) => (
+            <button
+              key={f}
+              className={`filter-pill${filter === f ? ' active' : ''}`}
+              onClick={() => setFilter(f)}
+            >
+              {f === 'all' ? 'All' : f[0].toUpperCase() + f.slice(1)}
+            </button>
+          ))}
+        </div>
+        <div className="view-toggle">
           <button
-            key={f}
-            className={`filter-pill${filter === f ? ' active' : ''}`}
-            onClick={() => setFilter(f)}
+            className={`view-toggle-btn${view === 'list' ? ' active' : ''}`}
+            aria-label="List view"
+            onClick={() => setView('list')}
           >
-            {f === 'all' ? 'All' : f[0].toUpperCase() + f.slice(1)}
+            ☰
           </button>
-        ))}
+          <button
+            className={`view-toggle-btn${view === 'card' ? ' active' : ''}`}
+            aria-label="Card view"
+            onClick={() => setView('card')}
+          >
+            ▦
+          </button>
+        </div>
       </div>
       {visible.length === 0 ? (
         <p className="empty-note">No entries match this filter.</p>
       ) : (
-        <ul className="entry-list">
+        <ul className={view === 'card' ? 'entry-cards' : 'entry-list'}>
           {visible.map((entry) => {
-        const label = recurrenceLabel(entry);
-        return (
-          <li key={entry.id} className="entry-row">
-            {editingId === entry.id && draft ? (
-              <div className="entry-edit-row">
-                <input
-                  className="entry-edit-input"
-                  value={draft.raw_text}
-                  onChange={(e) => setDraft({ ...draft, raw_text: e.target.value })}
-                />
-                <select
-                  className="entry-edit-select"
-                  aria-label="domain"
-                  value={draft.domain}
-                  onChange={(e) => setDraft({ ...draft, domain: e.target.value as Entry['domain'] })}
-                >
-                  {DOMAINS.map((d) => <option key={d} value={d}>{d}</option>)}
-                </select>
-                <select
-                  className="entry-edit-select"
-                  aria-label="type"
-                  value={draft.type}
-                  onChange={(e) => setDraft({ ...draft, type: e.target.value as Entry['type'] })}
-                >
-                  {TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-                </select>
-                <select
-                  className="entry-edit-select"
-                  aria-label="repeats"
-                  value={draft.recurrence?.freq ?? ''}
-                  onChange={(e) => {
-                    const value = e.target.value;
-                    setDraft({
-                      ...draft,
-                      recurrence: value
-                        ? { freq: value as Recurrence['freq'], interval: draft.recurrence?.interval ?? 1 }
-                        : null,
-                    });
-                  }}
-                >
-                  <option value="">Doesn&apos;t repeat</option>
-                  {RECURRENCE_FREQS.map((f) => <option key={f} value={f}>{f}</option>)}
-                </select>
-                <button className="btn-save" onClick={saveEdit}>Save</button>
-                <button className="btn-cancel" onClick={cancelEdit}>Cancel</button>
-              </div>
-            ) : (
-              <>
-                <span className={`entry-dot domain-${entry.domain}`} aria-hidden="true" />
-                <span className="entry-text">{entry.raw_text}</span>
-                {label && <span className="recur-indicator" title={label} aria-hidden="true">↻</span>}
-                <small className="entry-meta"> ({entry.domain}/{entry.type})</small>
-                <span className="entry-actions">
-                  <button className="btn-text" onClick={() => startEdit(entry)}>Edit</button>
-                  <button className="btn-text" onClick={() => onDelete(entry.id)}>Delete</button>
-                </span>
-              </>
-            )}
-          </li>
-        );
+            const label = recurrenceLabel(entry);
+            return (
+              <li key={entry.id} className={view === 'card' ? 'entry-card' : 'entry-row'}>
+                {editingId === entry.id && draft ? (
+                  <div className="entry-edit-row">
+                    <input
+                      className="entry-edit-input"
+                      value={draft.raw_text}
+                      onChange={(e) => setDraft({ ...draft, raw_text: e.target.value })}
+                    />
+                    <select
+                      className="entry-edit-select"
+                      aria-label="domain"
+                      value={draft.domain}
+                      onChange={(e) => setDraft({ ...draft, domain: e.target.value as Entry['domain'] })}
+                    >
+                      {DOMAINS.map((d) => <option key={d} value={d}>{d}</option>)}
+                    </select>
+                    <select
+                      className="entry-edit-select"
+                      aria-label="type"
+                      value={draft.type}
+                      onChange={(e) => setDraft({ ...draft, type: e.target.value as Entry['type'] })}
+                    >
+                      {TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+                    </select>
+                    <select
+                      className="entry-edit-select"
+                      aria-label="repeats"
+                      value={draft.recurrence?.freq ?? ''}
+                      onChange={(e) => {
+                        const value = e.target.value;
+                        setDraft({
+                          ...draft,
+                          recurrence: value
+                            ? { freq: value as Recurrence['freq'], interval: draft.recurrence?.interval ?? 1 }
+                            : null,
+                        });
+                      }}
+                    >
+                      <option value="">Doesn&apos;t repeat</option>
+                      {RECURRENCE_FREQS.map((f) => <option key={f} value={f}>{f}</option>)}
+                    </select>
+                    <button className="btn-save" onClick={saveEdit}>Save</button>
+                    <button className="btn-cancel" onClick={cancelEdit}>Cancel</button>
+                  </div>
+                ) : (
+                  <>
+                    <div className="entry-main">
+                      <span className={`domain-tag domain-${entry.domain}`}>{entry.domain}</span>
+                      <span className="entry-text">{entry.raw_text}</span>
+                      {label && <span className="recur-indicator" title={label} aria-hidden="true">↻</span>}
+                    </div>
+                    <div className="entry-footer">
+                      <span className="type-label">{entry.type}</span>
+                      <span className="entry-actions">
+                        <button className="btn-text" onClick={() => startEdit(entry)}>Edit</button>
+                        <button className="btn-text" onClick={() => onDelete(entry.id)}>Delete</button>
+                      </span>
+                    </div>
+                  </>
+                )}
+              </li>
+            );
           })}
         </ul>
       )}

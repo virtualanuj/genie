@@ -236,6 +236,51 @@ select {
 
 /* ---- entry list ---- */
 
+.list-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.domain-tag {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  text-transform: capitalize;
+}
+
+.domain-tag.domain-work {
+  color: var(--domain-work);
+  border-color: var(--domain-work);
+  background: color-mix(in srgb, var(--domain-work) 16%, transparent);
+}
+
+.domain-tag.domain-finance {
+  color: var(--domain-finance);
+  border-color: var(--domain-finance);
+  background: color-mix(in srgb, var(--domain-finance) 16%, transparent);
+}
+
+.domain-tag.domain-personal {
+  color: var(--domain-personal);
+  border-color: var(--domain-personal);
+  background: color-mix(in srgb, var(--domain-personal) 16%, transparent);
+}
+
+.type-label {
+  color: var(--text-faint);
+  font-size: 12px;
+  text-transform: capitalize;
+}
+
 .entry-list {
   list-style: none;
   margin: 0;
@@ -254,23 +299,19 @@ select {
   border-bottom: none;
 }
 
-.entry-dot {
+.entry-row .entry-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+}
+
+.entry-row .entry-footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   flex: none;
-  width: 7px;
-  height: 7px;
-  border-radius: 999px;
-}
-
-.entry-dot.domain-work {
-  background: var(--domain-work);
-}
-
-.entry-dot.domain-finance {
-  background: var(--domain-finance);
-}
-
-.entry-dot.domain-personal {
-  background: var(--domain-personal);
 }
 
 .entry-text {
@@ -279,12 +320,6 @@ select {
   color: var(--text);
   font-size: 14.5px;
   overflow-wrap: break-word;
-}
-
-.entry-meta {
-  flex: none;
-  color: var(--text-faint);
-  font-size: 12.5px;
 }
 
 .entry-actions {
@@ -296,8 +331,78 @@ select {
 }
 
 .entry-row:hover .entry-actions,
-.entry-row:focus-within .entry-actions {
+.entry-row:focus-within .entry-actions,
+.entry-card:hover .entry-actions,
+.entry-card:focus-within .entry-actions {
   opacity: 1;
+}
+
+/* ---- entry cards ---- */
+
+.entry-cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 10px;
+}
+
+.entry-card {
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.entry-card .entry-main {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.entry-card .entry-text {
+  flex: none;
+}
+
+.entry-card .entry-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: auto;
+}
+
+.view-toggle {
+  flex: none;
+  display: flex;
+  gap: 2px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  padding: 2px;
+}
+
+.view-toggle-btn {
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  font-size: 13px;
+  line-height: 1;
+  padding: 5px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.view-toggle-btn:hover {
+  color: var(--text);
+}
+
+.view-toggle-btn.active {
+  background: var(--surface-raised);
+  color: var(--text);
 }
 
 .btn-text {
@@ -464,8 +569,8 @@ select {
 
 .filter-pills {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
-  margin-bottom: 12px;
 }
 
 .filter-pill {
