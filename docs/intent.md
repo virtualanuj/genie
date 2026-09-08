@@ -29,6 +29,24 @@ and later helps you find it and reminds you when it's due.
 - **Correctable.** If something is categorized or extracted wrong,
   it's easy to edit or delete.
 
+## Goals (v1.1)
+
+- **Recurrence detection.** If you say something recurs ("pay rent
+  every month", "gym every Monday"), the genie recognizes that and
+  keeps reminding you for every future occurrence — not just once.
+- **History preserved.** Each occurrence of a recurring item is its
+  own captured entry, so past occurrences stay searchable and countable
+  (e.g. "how much have I spent on rent this year") rather than being
+  overwritten.
+- **Visible recurrence.** Entries the genie recognizes as recurring
+  are visually marked as such.
+- **Due vs. Upcoming.** The at-a-glance reminder view distinguishes
+  what's due right now from what's coming up soon, instead of lumping
+  both together.
+- **Filterable, priority-sorted recent list.** You can filter your
+  captured entries (by domain) and they're sorted so what's due
+  soonest surfaces first.
+
 ## Non-goals (v1)
 
 These are deliberately out of scope for the first version, to keep it

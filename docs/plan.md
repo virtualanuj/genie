@@ -22,6 +22,9 @@
 - Route handlers that take an `:id` param must reject a non-numeric id with 400 before touching the database.
 - `PATCH /api/entries/:id` must reject a `domain`/`type` value outside the allowed enums with 400.
 - Editing an entry's `raw_text`, `domain`, and `type` from the UI is a v1 requirement (per intent.md's "Correctable" goal) — not just delete.
+- **v1.1 (Tasks 11-15):** a recurring entry's occurrences are never overwritten in place — each occurrence is its own row, linked via `series_id`, so history stays searchable (per spec.md's Recurrence section).
+- Recurrence advancement (`advanceRecurringEntries`) is lazy — triggered by `GET /api/entries` and `GET /api/entries/due` — never a background job/cron.
+- Recurrence shape everywhere (Gemini prompt, DB, API, client): `{ freq: 'daily'|'weekly'|'monthly'|'yearly', interval: number }`, stored as nullable JSON text, same convention as `structured`.
 
 ---
 
@@ -1902,3 +1905,1245 @@ git commit -m "feat: add search UI, add README"
 4. Type a work task with no due date, submit — confirm it's categorized `work/task` and does *not* appear in the Due panel.
 5. In the Ask Genie box, ask "how much did I say I'd spend on rent?" — confirm the answer references the $1500 entry.
 6. Delete one entry from the list — confirm it disappears and does not reappear on refresh.
+
+---
+
+# v1.1 — Recurring Tasks, Due/Upcoming Split, Recent Filters/Sort
+
+**Spec:** `docs/spec.md`'s Recurrence, Reminders, and "Recent list: filter
++ sort" sections (`requirements: docs/intent.md`'s v1.1 goals).
+
+### Task 11: Recurrence in the data layer and classification
+
+**Files:**
+- Modify: `server/src/db.ts`
+- Modify: `server/test/db.test.ts`
+- Modify: `server/src/gemini.ts`
+- Modify: `server/test/gemini.test.ts`
+
+**Interfaces:**
+- Consumes: nothing new.
+- Produces: `Recurrence`/`RecurrenceFreq` types, `Entry.recurrence`/
+  `series_id`/`spawned_next` fields, `NewEntry.recurrence`/`series_id`,
+  `advanceRecurringEntries(db, nowISO): Entry[]` (all from `db.ts`,
+  used by Task 12's routes); `ClassifyResult.recurrence` (from
+  `gemini.ts`, used by Task 12's POST handler).
+
+- [ ] **Step 1: Write failing tests for recurrence storage and `advanceRecurringEntries`**
+
+Append to `server/test/db.test.ts` (add `advanceRecurringEntries` to
+the existing import from `../src/db.js`):
+```ts
+import {
+  openDb, createEntry, getEntry, listEntries, listDueEntries, updateEntry, deleteEntry,
+  advanceRecurringEntries,
+} from '../src/db.js';
+```
+
+Add these `it` blocks inside the existing `describe('db', ...)` block,
+after the `'deletes an entry'` test:
+```ts
+  it('stores and retrieves recurrence, series_id, and spawned_next', () => {
+    const entry = createEntry(db, {
+      raw_text: 'pay rent', domain: 'finance', type: 'expense', structured: { amount: 1500 },
+      remind_at: '2026-01-05T00:00:00.000Z',
+      recurrence: { freq: 'monthly', interval: 1 },
+    });
+    expect(JSON.parse(entry.recurrence!)).toEqual({ freq: 'monthly', interval: 1 });
+    expect(entry.series_id).toBeNull();
+    expect(entry.spawned_next).toBe(0);
+  });
+
+  it('updateEntry can set and clear recurrence', () => {
+    const entry = createEntry(db, {
+      raw_text: 'pay rent', domain: 'finance', type: 'expense', structured: {},
+      remind_at: '2026-01-05T00:00:00.000Z',
+    });
+    const withRecurrence = updateEntry(db, entry.id, { recurrence: { freq: 'weekly', interval: 2 } });
+    expect(JSON.parse(withRecurrence!.recurrence!)).toEqual({ freq: 'weekly', interval: 2 });
+
+    const cleared = updateEntry(db, entry.id, { recurrence: null });
+    expect(cleared!.recurrence).toBeNull();
+  });
+});
+
+describe('advanceRecurringEntries', () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = openDb(':memory:');
+  });
+
+  it('spawns the next occurrence for a due recurring entry', () => {
+    const source = createEntry(db, {
+      raw_text: 'pay rent', domain: 'finance', type: 'expense', structured: { amount: 1500 },
+      remind_at: '2026-01-05T00:00:00.000Z',
+      recurrence: { freq: 'monthly', interval: 1 },
+    });
+
+    const created = advanceRecurringEntries(db, '2026-01-06T00:00:00.000Z');
+
+    expect(created).toHaveLength(1);
+    expect(created[0].remind_at).toBe('2026-02-05T00:00:00.000Z');
+    expect(created[0].series_id).toBe(source.id);
+    expect(created[0].raw_text).toBe('pay rent');
+
+    const updatedSource = getEntry(db, source.id)!;
+    expect(updatedSource.spawned_next).toBe(1);
+  });
+
+  it('does not spawn twice for the same source', () => {
+    createEntry(db, {
+      raw_text: 'pay rent', domain: 'finance', type: 'expense', structured: {},
+      remind_at: '2026-01-05T00:00:00.000Z',
+      recurrence: { freq: 'monthly', interval: 1 },
+    });
+
+    advanceRecurringEntries(db, '2026-01-06T00:00:00.000Z');
+    const secondPass = advanceRecurringEntries(db, '2026-01-06T00:00:00.000Z');
+
+    expect(secondPass).toHaveLength(0);
+  });
+
+  it('chains series_id through multiple spawned occurrences', () => {
+    const source = createEntry(db, {
+      raw_text: 'pay rent', domain: 'finance', type: 'expense', structured: {},
+      remind_at: '2026-01-05T00:00:00.000Z',
+      recurrence: { freq: 'monthly', interval: 1 },
+    });
+    const [first] = advanceRecurringEntries(db, '2026-01-06T00:00:00.000Z');
+    const [second] = advanceRecurringEntries(db, '2026-02-06T00:00:00.000Z');
+
+    expect(first.series_id).toBe(source.id);
+    expect(second.series_id).toBe(source.id);
+  });
+
+  it('ignores entries with no recurrence', () => {
+    createEntry(db, {
+      raw_text: 'one-off', domain: 'personal', type: 'note', structured: {},
+      remind_at: '2020-01-01T00:00:00.000Z',
+    });
+    expect(advanceRecurringEntries(db, '2026-01-01T00:00:00.000Z')).toHaveLength(0);
+  });
+
+  it('ignores recurring entries that are not due yet', () => {
+    createEntry(db, {
+      raw_text: 'pay rent', domain: 'finance', type: 'expense', structured: {},
+      remind_at: '2099-01-05T00:00:00.000Z',
+      recurrence: { freq: 'monthly', interval: 1 },
+    });
+    expect(advanceRecurringEntries(db, '2026-01-01T00:00:00.000Z')).toHaveLength(0);
+  });
+});
+```
+
+(Note: the closing `});` of the original `describe('db', ...)` block
+moves up to right after the two new tests inside it, then a new
+top-level `describe('advanceRecurringEntries', ...)` follows, as shown
+above.)
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `npm run test --workspace=server`
+Expected: FAIL — `advanceRecurringEntries` is not exported, and the
+`recurrence`/`series_id`/`spawned_next` fields don't exist yet.
+
+- [ ] **Step 3: Implement the schema, type, and function changes in `server/src/db.ts`**
+
+Replace the whole file with:
+```ts
+import Database from 'better-sqlite3';
+
+export type Domain = 'work' | 'finance' | 'personal';
+export type EntryType = 'task' | 'expense' | 'note' | 'reminder' | 'event';
+export type RecurrenceFreq = 'daily' | 'weekly' | 'monthly' | 'yearly';
+
+export interface Recurrence {
+  freq: RecurrenceFreq;
+  interval: number;
+}
+
+export interface Entry {
+  id: number;
+  raw_text: string;
+  domain: Domain;
+  type: EntryType;
+  structured: string;
+  tags: string | null;
+  remind_at: string | null;
+  recurrence: string | null;
+  series_id: number | null;
+  spawned_next: 0 | 1;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface NewEntry {
+  raw_text: string;
+  domain: Domain;
+  type: EntryType;
+  structured: Record<string, unknown>;
+  tags?: string | null;
+  remind_at?: string | null;
+  recurrence?: Recurrence | null;
+  series_id?: number | null;
+}
+
+export function openDb(path: string): Database.Database {
+  const db = new Database(path);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS entries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      raw_text TEXT NOT NULL,
+      domain TEXT NOT NULL,
+      type TEXT NOT NULL,
+      structured TEXT NOT NULL,
+      tags TEXT,
+      remind_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `);
+  for (const migration of [
+    'ALTER TABLE entries ADD COLUMN recurrence TEXT',
+    'ALTER TABLE entries ADD COLUMN series_id INTEGER',
+    'ALTER TABLE entries ADD COLUMN spawned_next INTEGER NOT NULL DEFAULT 0',
+  ]) {
+    try {
+      db.exec(migration);
+    } catch {
+      // column already exists (pre-existing db from before v1.1)
+    }
+  }
+  return db;
+}
+
+export function createEntry(db: Database.Database, entry: NewEntry): Entry {
+  const now = new Date().toISOString();
+  const stmt = db.prepare(`
+    INSERT INTO entries (raw_text, domain, type, structured, tags, remind_at, recurrence, series_id, spawned_next, created_at, updated_at)
+    VALUES (@raw_text, @domain, @type, @structured, @tags, @remind_at, @recurrence, @series_id, 0, @created_at, @updated_at)
+  `);
+  const info = stmt.run({
+    raw_text: entry.raw_text,
+    domain: entry.domain,
+    type: entry.type,
+    structured: JSON.stringify(entry.structured),
+    tags: entry.tags ?? null,
+    remind_at: entry.remind_at ?? null,
+    recurrence: entry.recurrence ? JSON.stringify(entry.recurrence) : null,
+    series_id: entry.series_id ?? null,
+    created_at: now,
+    updated_at: now,
+  });
+  return getEntry(db, Number(info.lastInsertRowid))!;
+}
+
+export function getEntry(db: Database.Database, id: number): Entry | undefined {
+  return db.prepare('SELECT * FROM entries WHERE id = ?').get(id) as Entry | undefined;
+}
+
+export function listEntries(db: Database.Database, limit = 50): Entry[] {
+  return db.prepare('SELECT * FROM entries ORDER BY created_at DESC, id DESC LIMIT ?').all(limit) as Entry[];
+}
+
+export function listDueEntries(db: Database.Database, before: string): Entry[] {
+  return db
+    .prepare('SELECT * FROM entries WHERE remind_at IS NOT NULL AND remind_at <= ? ORDER BY remind_at ASC')
+    .all(before) as Entry[];
+}
+
+export function updateEntry(db: Database.Database, id: number, fields: Partial<NewEntry>): Entry | undefined {
+  const existing = getEntry(db, id);
+  if (!existing) return undefined;
+  const merged = {
+    id,
+    raw_text: fields.raw_text ?? existing.raw_text,
+    domain: fields.domain ?? existing.domain,
+    type: fields.type ?? existing.type,
+    structured: fields.structured ? JSON.stringify(fields.structured) : existing.structured,
+    tags: fields.tags !== undefined ? fields.tags : existing.tags,
+    remind_at: fields.remind_at !== undefined ? fields.remind_at : existing.remind_at,
+    recurrence: fields.recurrence !== undefined
+      ? (fields.recurrence === null ? null : JSON.stringify(fields.recurrence))
+      : existing.recurrence,
+    updated_at: new Date().toISOString(),
+  };
+  db.prepare(`
+    UPDATE entries SET raw_text=@raw_text, domain=@domain, type=@type, structured=@structured,
+      tags=@tags, remind_at=@remind_at, recurrence=@recurrence, updated_at=@updated_at WHERE id=@id
+  `).run(merged);
+  return getEntry(db, id);
+}
+
+export function deleteEntry(db: Database.Database, id: number): boolean {
+  const info = db.prepare('DELETE FROM entries WHERE id = ?').run(id);
+  return info.changes > 0;
+}
+
+function advanceDate(iso: string, recurrence: Recurrence): string {
+  const date = new Date(iso);
+  switch (recurrence.freq) {
+    case 'daily':
+      date.setDate(date.getDate() + recurrence.interval);
+      break;
+    case 'weekly':
+      date.setDate(date.getDate() + recurrence.interval * 7);
+      break;
+    case 'monthly':
+      date.setMonth(date.getMonth() + recurrence.interval);
+      break;
+    case 'yearly':
+      date.setFullYear(date.getFullYear() + recurrence.interval);
+      break;
+  }
+  return date.toISOString();
+}
+
+export function advanceRecurringEntries(db: Database.Database, nowISO: string): Entry[] {
+  const due = db
+    .prepare(`
+      SELECT * FROM entries
+      WHERE recurrence IS NOT NULL AND spawned_next = 0
+        AND remind_at IS NOT NULL AND remind_at <= ?
+    `)
+    .all(nowISO) as Entry[];
+
+  const created: Entry[] = [];
+  for (const source of due) {
+    const recurrence = JSON.parse(source.recurrence!) as Recurrence;
+    const nextRemindAt = advanceDate(source.remind_at!, recurrence);
+    const seriesId = source.series_id ?? source.id;
+
+    const spawned = createEntry(db, {
+      raw_text: source.raw_text,
+      domain: source.domain,
+      type: source.type,
+      structured: JSON.parse(source.structured),
+      tags: source.tags,
+      remind_at: nextRemindAt,
+      recurrence,
+      series_id: seriesId,
+    });
+    db.prepare('UPDATE entries SET spawned_next = 1 WHERE id = ?').run(source.id);
+    created.push(spawned);
+  }
+  return created;
+}
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `npm run test --workspace=server`
+Expected: all `db.test.ts` tests PASS.
+
+- [ ] **Step 5: Write failing tests for recurrence in classification**
+
+Append to `server/test/gemini.test.ts`, inside the existing
+`describe('classifyEntry', ...)` block:
+```ts
+  it('includes recurrence when Gemini detects one', async () => {
+    const client = mockClient(JSON.stringify({
+      domain: 'finance', type: 'expense', structured: { amount: 1500 },
+      remind_at: '2026-01-05T00:00:00.000Z',
+      recurrence: { freq: 'monthly', interval: 1 },
+    }));
+    const result = await classifyEntry(client, 'pay rent $1500 every month');
+    expect(result.recurrence).toEqual({ freq: 'monthly', interval: 1 });
+  });
+
+  it('defaults recurrence to null when omitted', async () => {
+    const client = mockClient(JSON.stringify({ domain: 'personal', type: 'note', remind_at: null }));
+    const result = await classifyEntry(client, 'saw a nice sunset');
+    expect(result.recurrence).toBeNull();
+  });
+```
+
+- [ ] **Step 6: Run the tests to verify they fail**
+
+Run: `npm run test --workspace=server`
+Expected: FAIL — `result.recurrence` is `undefined`, not present on
+`ClassifyResult`.
+
+- [ ] **Step 7: Implement the recurrence changes in `server/src/gemini.ts`**
+
+```ts
+import type { GoogleGenAI } from '@google/genai';
+import type { Domain, EntryType, Recurrence } from './db.js';
+
+export interface ClassifyResult {
+  domain: Domain;
+  type: EntryType;
+  structured: Record<string, unknown>;
+  remind_at: string | null;
+  recurrence: Recurrence | null;
+}
+
+const CLASSIFY_SYSTEM_PROMPT = `You are a personal organizer. Given a short note the user typed or spoke, classify it and extract structured details.
+
+Respond with ONLY a JSON object, no other text, matching this shape:
+{
+  "domain": "work" | "finance" | "personal",
+  "type": "task" | "expense" | "note" | "reminder" | "event",
+  "structured": { <type-specific fields, e.g. amount/currency/category for expense, due_date/project for task, date/location for event> },
+  "remind_at": "<ISO 8601 timestamp, or null if there's no clear due date/time>",
+  "recurrence": null | { "freq": "daily" | "weekly" | "monthly" | "yearly", "interval": <positive integer, e.g. 1 for "every month", 2 for "every 2 weeks"> }
+}
+
+Only set "recurrence" when the text clearly implies something repeats
+("every month", "weekly", "each Monday", "annually"). Otherwise it
+must be null. When recurrence is set, "remind_at" should be the first
+upcoming occurrence.
+
+Today's date is {{today}}.`;
+
+export async function classifyEntry(
+  client: Pick<GoogleGenAI, 'models'>,
+  rawText: string
+): Promise<ClassifyResult> {
+  const systemInstruction = CLASSIFY_SYSTEM_PROMPT.replace('{{today}}', new Date().toISOString().slice(0, 10));
+  const response = await client.models.generateContent({
+    model: 'gemini-flash-lite-latest',
+    contents: rawText,
+    config: { systemInstruction },
+  });
+
+  if (!response.text) throw new Error('Gemini response had no text content');
+
+  const parsed = JSON.parse(response.text);
+  return {
+    domain: parsed.domain,
+    type: parsed.type,
+    structured: parsed.structured ?? {},
+    remind_at: parsed.remind_at ?? null,
+    recurrence: parsed.recurrence ?? null,
+  };
+}
+```
+
+- [ ] **Step 8: Run the tests to verify they pass**
+
+Run: `npm run test --workspace=server`
+Expected: all `db.test.ts` and `gemini.test.ts` tests PASS.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add server/src/db.ts server/test/db.test.ts server/src/gemini.ts server/test/gemini.test.ts
+git commit -m "feat: add recurrence storage, series linking, and advanceRecurringEntries"
+```
+
+---
+
+### Task 12: Wire recurrence into the entries API
+
+**Files:**
+- Modify: `server/src/routes/entries.ts`
+- Modify: `server/test/entries.route.test.ts`
+
+**Interfaces:**
+- Consumes: `advanceRecurringEntries`, `Recurrence`, `RecurrenceFreq`
+  from `server/src/db.ts` (Task 11); `ClassifyResult.recurrence` from
+  `server/src/gemini.ts` (Task 11).
+- Produces: no new exports — `GET /api/entries` and `GET
+  /api/entries/due` now self-advance recurring entries first; `PATCH
+  /api/entries/:id` accepts and validates `recurrence`.
+
+- [ ] **Step 1: Write failing tests**
+
+Add to `server/test/entries.route.test.ts`, inside the existing
+`describe('entries API', ...)` block:
+```ts
+  it('POST /api/entries stores recurrence when Gemini detects one', async () => {
+    const gemini = mockGemini(JSON.stringify({
+      domain: 'finance', type: 'expense', structured: {}, remind_at: '2026-01-05T00:00:00.000Z',
+      recurrence: { freq: 'monthly', interval: 1 },
+    }));
+    const app = buildApp(db, gemini as never);
+
+    const res = await request(app).post('/api/entries').send({ raw_text: 'pay rent every month' });
+
+    expect(res.status).toBe(201);
+    expect(JSON.parse(res.body.recurrence)).toEqual({ freq: 'monthly', interval: 1 });
+  });
+
+  it('GET /api/entries advances due recurring entries before listing', async () => {
+    const gemini = mockGemini(JSON.stringify({
+      domain: 'finance', type: 'expense', structured: {}, remind_at: '2020-01-05T00:00:00.000Z',
+      recurrence: { freq: 'monthly', interval: 1 },
+    }));
+    const app = buildApp(db, gemini as never);
+    await request(app).post('/api/entries').send({ raw_text: 'pay rent every month' });
+
+    const res = await request(app).get('/api/entries');
+
+    expect(res.body).toHaveLength(2);
+  });
+
+  it('PATCH /api/entries/:id returns 400 for an invalid recurrence freq', async () => {
+    const gemini = mockGemini(JSON.stringify({ domain: 'personal', type: 'note', structured: {}, remind_at: null }));
+    const app = buildApp(db, gemini as never);
+    const created = await request(app).post('/api/entries').send({ raw_text: 'note' });
+
+    const res = await request(app)
+      .patch(`/api/entries/${created.body.id}`)
+      .send({ recurrence: { freq: 'hourly', interval: 1 } });
+
+    expect(res.status).toBe(400);
+  });
+
+  it('PATCH /api/entries/:id accepts a valid recurrence and clearing it', async () => {
+    const gemini = mockGemini(JSON.stringify({ domain: 'personal', type: 'note', structured: {}, remind_at: null }));
+    const app = buildApp(db, gemini as never);
+    const created = await request(app).post('/api/entries').send({ raw_text: 'note' });
+
+    const withRecurrence = await request(app)
+      .patch(`/api/entries/${created.body.id}`)
+      .send({ recurrence: { freq: 'weekly', interval: 2 } });
+    expect(withRecurrence.status).toBe(200);
+    expect(JSON.parse(withRecurrence.body.recurrence)).toEqual({ freq: 'weekly', interval: 2 });
+
+    const cleared = await request(app)
+      .patch(`/api/entries/${created.body.id}`)
+      .send({ recurrence: null });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.recurrence).toBeNull();
+  });
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `npm run test --workspace=server`
+Expected: FAIL — recurrence isn't passed through on POST, `GET
+/api/entries` returns only 1 entry (no advancement), and PATCH accepts
+an invalid `recurrence` (no validation yet).
+
+- [ ] **Step 3: Implement `server/src/routes/entries.ts`**
+
+```ts
+import { Router } from 'express';
+import type Database from 'better-sqlite3';
+import type { GoogleGenAI } from '@google/genai';
+import { classifyEntry } from '../gemini.js';
+import {
+  createEntry, listEntries, listDueEntries, updateEntry, deleteEntry, advanceRecurringEntries,
+  type Domain, type EntryType, type RecurrenceFreq,
+} from '../db.js';
+
+const DOMAINS: Domain[] = ['work', 'finance', 'personal'];
+const TYPES: EntryType[] = ['task', 'expense', 'note', 'reminder', 'event'];
+const RECURRENCE_FREQS: RecurrenceFreq[] = ['daily', 'weekly', 'monthly', 'yearly'];
+
+function parseId(raw: string): number | undefined {
+  const id = Number(raw);
+  return Number.isInteger(id) ? id : undefined;
+}
+
+function isValidRecurrence(value: unknown): boolean {
+  if (value === null) return true;
+  if (typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.freq === 'string' && RECURRENCE_FREQS.includes(v.freq as RecurrenceFreq) &&
+    typeof v.interval === 'number' && v.interval > 0
+  );
+}
+
+export function entriesRouter(db: Database.Database, gemini: Pick<GoogleGenAI, 'models'>): Router {
+  const router = Router();
+
+  router.post('/', async (req, res) => {
+    const rawText = req.body?.raw_text;
+    if (typeof rawText !== 'string' || rawText.trim() === '') {
+      return res.status(400).json({ error: 'raw_text is required' });
+    }
+    try {
+      const classified = await classifyEntry(gemini, rawText);
+      const entry = createEntry(db, {
+        raw_text: rawText,
+        domain: classified.domain,
+        type: classified.type,
+        structured: classified.structured,
+        remind_at: classified.remind_at,
+        recurrence: classified.recurrence,
+      });
+      res.status(201).json(entry);
+    } catch (err) {
+      res.status(502).json({ error: 'classification failed', detail: (err as Error).message });
+    }
+  });
+
+  router.get('/', (_req, res) => {
+    advanceRecurringEntries(db, new Date().toISOString());
+    res.json(listEntries(db));
+  });
+
+  router.get('/due', (req, res) => {
+    const before = typeof req.query.before === 'string' ? req.query.before : new Date().toISOString();
+    advanceRecurringEntries(db, new Date().toISOString());
+    res.json(listDueEntries(db, before));
+  });
+
+  router.patch('/:id', (req, res) => {
+    const id = parseId(req.params.id);
+    if (id === undefined) return res.status(400).json({ error: 'invalid id' });
+
+    const body = req.body ?? {};
+    if (body.domain !== undefined && !DOMAINS.includes(body.domain)) {
+      return res.status(400).json({ error: `domain must be one of ${DOMAINS.join(', ')}` });
+    }
+    if (body.type !== undefined && !TYPES.includes(body.type)) {
+      return res.status(400).json({ error: `type must be one of ${TYPES.join(', ')}` });
+    }
+    if (body.recurrence !== undefined && !isValidRecurrence(body.recurrence)) {
+      return res.status(400).json({
+        error: `recurrence must be null or { freq: ${RECURRENCE_FREQS.join('|')}, interval: positive number }`,
+      });
+    }
+
+    const updated = updateEntry(db, id, body);
+    if (!updated) return res.status(404).json({ error: 'not found' });
+    res.json(updated);
+  });
+
+  router.delete('/:id', (req, res) => {
+    const id = parseId(req.params.id);
+    if (id === undefined) return res.status(400).json({ error: 'invalid id' });
+
+    const ok = deleteEntry(db, id);
+    if (!ok) return res.status(404).json({ error: 'not found' });
+    res.status(204).send();
+  });
+
+  return router;
+}
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `npm run test --workspace=server`
+Expected: all `entries.route.test.ts` tests PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add server/src/routes/entries.ts server/test/entries.route.test.ts
+git commit -m "feat: wire recurrence advancement and validation into entries API"
+```
+
+---
+
+### Task 13: Recurrence indicator and edit UI (client)
+
+**Files:**
+- Modify: `client/src/api.ts`
+- Modify: `client/src/EntryList.tsx`
+- Modify: `client/test/EntryList.test.tsx`
+- Modify: `client/src/styles.css`
+
+**Interfaces:**
+- Consumes: nothing new from other client files.
+- Produces: `Entry.recurrence`/`series_id`, `RECURRENCE_FREQS` (from
+  `api.ts`); `EntryList`'s `onEdit` fields gain an optional
+  `recurrence` — consumed by Task 15 unchanged (Task 15 only adds
+  filter/sort, not new fields).
+
+- [ ] **Step 1: Write failing tests**
+
+Add to `client/test/EntryList.test.tsx`, after the existing `entry`
+const, add a recurring variant, and new tests inside `describe('EntryList', ...)`:
+```tsx
+const recurringEntry: Entry = {
+  ...entry, id: 2, raw_text: 'pay rent',
+  recurrence: JSON.stringify({ freq: 'monthly', interval: 1 }),
+};
+```
+
+```tsx
+  it('shows a recurrence indicator for entries with a recurrence', () => {
+    render(<EntryList entries={[recurringEntry]} onDelete={() => {}} onEdit={() => {}} />);
+    expect(screen.getByTitle(/recurs monthly/i)).toBeInTheDocument();
+  });
+
+  it('does not show a recurrence indicator for non-recurring entries', () => {
+    render(<EntryList entries={[entry]} onDelete={() => {}} onEdit={() => {}} />);
+    expect(screen.queryByTitle(/recurs/i)).not.toBeInTheDocument();
+  });
+
+  it('edit form lets you set a recurrence on a non-recurring entry', () => {
+    const onEdit = vi.fn();
+    render(<EntryList entries={[entry]} onDelete={() => {}} onEdit={onEdit} />);
+    fireEvent.click(screen.getByRole('button', { name: /^edit$/i }));
+    fireEvent.change(screen.getByRole('combobox', { name: /repeats/i }), { target: { value: 'weekly' } });
+    fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+    expect(onEdit).toHaveBeenCalledWith(1, expect.objectContaining({ recurrence: { freq: 'weekly', interval: 1 } }));
+  });
+
+  it('edit form lets you clear an existing recurrence', () => {
+    const onEdit = vi.fn();
+    render(<EntryList entries={[recurringEntry]} onDelete={() => {}} onEdit={onEdit} />);
+    fireEvent.click(screen.getByRole('button', { name: /^edit$/i }));
+    fireEvent.change(screen.getByRole('combobox', { name: /repeats/i }), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+    expect(onEdit).toHaveBeenCalledWith(2, expect.objectContaining({ recurrence: null }));
+  });
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `npm run test --workspace=client`
+Expected: FAIL — no recurrence indicator, no "repeats" combobox.
+
+- [ ] **Step 3: Add `recurrence`/`series_id` to `Entry` and export `RECURRENCE_FREQS` in `client/src/api.ts`**
+
+```ts
+export interface Entry {
+  id: number;
+  raw_text: string;
+  domain: 'work' | 'finance' | 'personal';
+  type: 'task' | 'expense' | 'note' | 'reminder' | 'event';
+  structured: string;
+  tags: string | null;
+  remind_at: string | null;
+  recurrence: string | null;
+  series_id: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export const DOMAINS: Entry['domain'][] = ['work', 'finance', 'personal'];
+export const TYPES: Entry['type'][] = ['task', 'expense', 'note', 'reminder', 'event'];
+export const RECURRENCE_FREQS = ['daily', 'weekly', 'monthly', 'yearly'] as const;
+export type RecurrenceFreq = (typeof RECURRENCE_FREQS)[number];
+export interface Recurrence { freq: RecurrenceFreq; interval: number }
+```
+(This block replaces the existing `Entry` interface and `DOMAINS`/
+`TYPES` constants at the top of the file — everything below them,
+including `updateEntry`, is unchanged except `updateEntry`'s
+signature, updated next.)
+
+Update `updateEntry`'s signature (the rest of the function body is
+unchanged):
+```ts
+export async function updateEntry(
+  id: number,
+  fields: Pick<Entry, 'raw_text' | 'domain' | 'type'> & { recurrence: Recurrence | null }
+): Promise<Entry> {
+```
+
+- [ ] **Step 4: Implement `client/src/EntryList.tsx`**
+
+```tsx
+import { useState } from 'react';
+import { DOMAINS, TYPES, RECURRENCE_FREQS, type Entry, type Recurrence } from './api.js';
+
+type Draft = { raw_text: string; domain: Entry['domain']; type: Entry['type']; recurrence: Recurrence | null };
+
+function recurrenceLabel(entry: Entry): string | null {
+  if (!entry.recurrence) return null;
+  try {
+    const r = JSON.parse(entry.recurrence) as Recurrence;
+    return r.interval > 1 ? `recurs every ${r.interval} ${r.freq}` : `recurs ${r.freq}`;
+  } catch {
+    return null;
+  }
+}
+
+export default function EntryList({
+  entries, onDelete, onEdit,
+}: {
+  entries: Entry[];
+  onDelete: (id: number) => void;
+  onEdit: (id: number, fields: Draft) => void;
+}) {
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [draft, setDraft] = useState<Draft | null>(null);
+
+  function startEdit(entry: Entry) {
+    setEditingId(entry.id);
+    setDraft({
+      raw_text: entry.raw_text,
+      domain: entry.domain,
+      type: entry.type,
+      recurrence: entry.recurrence ? (JSON.parse(entry.recurrence) as Recurrence) : null,
+    });
+  }
+
+  function cancelEdit() {
+    setEditingId(null);
+    setDraft(null);
+  }
+
+  function saveEdit() {
+    if (editingId !== null && draft) onEdit(editingId, draft);
+    cancelEdit();
+  }
+
+  if (entries.length === 0) {
+    return <p className="empty-note">Nothing captured yet — try the box above.</p>;
+  }
+
+  return (
+    <ul className="entry-list">
+      {entries.map((entry) => {
+        const label = recurrenceLabel(entry);
+        return (
+          <li key={entry.id} className="entry-row">
+            {editingId === entry.id && draft ? (
+              <div className="entry-edit-row">
+                <input
+                  className="entry-edit-input"
+                  value={draft.raw_text}
+                  onChange={(e) => setDraft({ ...draft, raw_text: e.target.value })}
+                />
+                <select
+                  className="entry-edit-select"
+                  aria-label="domain"
+                  value={draft.domain}
+                  onChange={(e) => setDraft({ ...draft, domain: e.target.value as Entry['domain'] })}
+                >
+                  {DOMAINS.map((d) => <option key={d} value={d}>{d}</option>)}
+                </select>
+                <select
+                  className="entry-edit-select"
+                  aria-label="type"
+                  value={draft.type}
+                  onChange={(e) => setDraft({ ...draft, type: e.target.value as Entry['type'] })}
+                >
+                  {TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+                </select>
+                <select
+                  className="entry-edit-select"
+                  aria-label="repeats"
+                  value={draft.recurrence?.freq ?? ''}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    setDraft({
+                      ...draft,
+                      recurrence: value ? { freq: value as Recurrence['freq'], interval: draft.recurrence?.interval ?? 1 } : null,
+                    });
+                  }}
+                >
+                  <option value="">Doesn't repeat</option>
+                  {RECURRENCE_FREQS.map((f) => <option key={f} value={f}>{f}</option>)}
+                </select>
+                <button className="btn-save" onClick={saveEdit}>Save</button>
+                <button className="btn-cancel" onClick={cancelEdit}>Cancel</button>
+              </div>
+            ) : (
+              <>
+                <span className={`entry-dot domain-${entry.domain}`} aria-hidden="true" />
+                <span className="entry-text">{entry.raw_text}</span>
+                {label && <span className="recur-indicator" title={label} aria-hidden="true">↻</span>}
+                <small className="entry-meta"> ({entry.domain}/{entry.type})</small>
+                <span className="entry-actions">
+                  <button className="btn-text" onClick={() => startEdit(entry)}>Edit</button>
+                  <button className="btn-text" onClick={() => onDelete(entry.id)}>Delete</button>
+                </span>
+              </>
+            )}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+```
+
+- [ ] **Step 5: Add the recurrence indicator style to `client/src/styles.css`**
+
+Append:
+```css
+.recur-indicator {
+  flex: none;
+  color: var(--accent);
+  font-size: 13px;
+  cursor: default;
+}
+```
+
+- [ ] **Step 6: Run the tests to verify they pass**
+
+Run: `npm run test --workspace=client`
+Expected: all `EntryList.test.tsx` tests PASS.
+
+- [ ] **Step 7: Run TypeScript and the full client suite**
+
+Run: `cd client && npx tsc -b --noEmit && cd .. && npm run test --workspace=client`
+Expected: no type errors, all tests PASS. (`App.tsx`'s call to
+`updateEntry` will now need `recurrence` included in the object it
+passes — since `App.tsx` already forwards whatever `EntryList` gives
+`onEdit` straight to `updateEntry(id, fields)` unchanged, no edit to
+`App.tsx` is needed here.)
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add client/src/api.ts client/src/EntryList.tsx client/test/EntryList.test.tsx client/src/styles.css
+git commit -m "feat: add recurrence indicator and edit UI to entries list"
+```
+
+---
+
+### Task 14: Split Due / Upcoming panel
+
+**Files:**
+- Modify: `client/src/DuePanel.tsx`
+- Modify: `client/test/DuePanel.test.tsx`
+- Modify: `client/src/App.tsx`
+- Modify: `client/src/styles.css`
+
+**Interfaces:**
+- Consumes: `Entry.recurrence` (Task 13), `listDueEntries()` (Task 7).
+- Produces: `<DuePanel refreshKey={number}>` now renders two `<section>`
+  elements (Due, Upcoming) instead of one — `App.tsx`'s wrapping
+  `<div className="section">` around it is removed since `DuePanel`
+  now supplies its own section spacing.
+
+- [ ] **Step 1: Replace `client/test/DuePanel.test.tsx` with failing tests for the split**
+
+```tsx
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen, waitFor, within } from '@testing-library/react';
+import DuePanel from '../src/DuePanel.js';
+import type { Entry } from '../src/api.js';
+
+function entry(overrides: Partial<Entry>): Entry {
+  return {
+    id: 1, raw_text: '', domain: 'personal', type: 'note', structured: '{}',
+    tags: null, remind_at: null, recurrence: null, series_id: null,
+    created_at: '2024-01-01T00:00:00.000Z', updated_at: '2024-01-01T00:00:00.000Z',
+    ...overrides,
+  };
+}
+
+describe('DuePanel', () => {
+  it('splits entries into Due (past/at now) and Upcoming (future within window)', async () => {
+    const past = entry({ id: 1, raw_text: 'pay rent', remind_at: new Date(Date.now() - 3600_000).toISOString() });
+    const future = entry({ id: 2, raw_text: 'call dentist', remind_at: new Date(Date.now() + 3600_000).toISOString() });
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => [past, future] }) as never;
+
+    render(<DuePanel />);
+    await waitFor(() => expect(screen.getByText(/pay rent/)).toBeInTheDocument());
+
+    const dueSection = screen.getByRole('heading', { name: /^due$/i }).closest('section')!;
+    const upcomingSection = screen.getByRole('heading', { name: /^upcoming$/i }).closest('section')!;
+    expect(within(dueSection).getByText(/pay rent/)).toBeInTheDocument();
+    expect(within(upcomingSection).getByText(/call dentist/)).toBeInTheDocument();
+  });
+
+  it('shows empty-state messages for each section when nothing qualifies', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => [] }) as never;
+    render(<DuePanel />);
+    await waitFor(() => expect(screen.getByText(/nothing due right now/i)).toBeInTheDocument());
+    expect(screen.getByText(/nothing coming up/i)).toBeInTheDocument();
+  });
+
+  it('shows a recurrence indicator on recurring entries', async () => {
+    const recurring = entry({
+      id: 3, raw_text: 'pay rent', remind_at: new Date(Date.now() - 1000).toISOString(),
+      recurrence: JSON.stringify({ freq: 'monthly', interval: 1 }),
+    });
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => [recurring] }) as never;
+    render(<DuePanel />);
+    await waitFor(() => expect(screen.getByTitle(/recurs monthly/i)).toBeInTheDocument());
+  });
+});
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `npm run test --workspace=client`
+Expected: FAIL — current `DuePanel` renders one "Due / Upcoming"
+heading, not separate "Due"/"Upcoming" headings, and has no recurrence
+indicator.
+
+- [ ] **Step 3: Implement `client/src/DuePanel.tsx`**
+
+```tsx
+import { useEffect, useState } from 'react';
+import { listDueEntries, type Entry, type Recurrence } from './api.js';
+
+function formatDue(iso: string): string {
+  try {
+    return new Date(iso).toLocaleString(undefined, {
+      month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+    });
+  } catch {
+    return iso;
+  }
+}
+
+function recurrenceLabel(entry: Entry): string | null {
+  if (!entry.recurrence) return null;
+  try {
+    const r = JSON.parse(entry.recurrence) as Recurrence;
+    return r.interval > 1 ? `recurs every ${r.interval} ${r.freq}` : `recurs ${r.freq}`;
+  } catch {
+    return null;
+  }
+}
+
+function DueRow({ entry }: { entry: Entry }) {
+  const label = recurrenceLabel(entry);
+  return (
+    <li className="due-row">
+      <span className="due-dot" aria-hidden="true" />
+      <span className="due-text">{entry.raw_text}</span>
+      {label && <span className="recur-indicator" title={label} aria-hidden="true">↻</span>}
+      <span className="due-time">{entry.remind_at ? formatDue(entry.remind_at) : ''}</span>
+    </li>
+  );
+}
+
+export default function DuePanel({ refreshKey }: { refreshKey?: number } = {}) {
+  const [entries, setEntries] = useState<Entry[] | null>(null);
+
+  useEffect(() => {
+    listDueEntries().then(setEntries).catch(() => setEntries([]));
+  }, [refreshKey]);
+
+  if (entries === null) return null;
+
+  const nowISO = new Date().toISOString();
+  const due = entries.filter((e) => e.remind_at && e.remind_at <= nowISO);
+  const upcoming = entries.filter((e) => e.remind_at && e.remind_at > nowISO);
+
+  return (
+    <>
+      <section className="section">
+        <h2 className="section-title">
+          Due
+          {due.length > 0 && <span className="section-count">{due.length}</span>}
+        </h2>
+        {due.length === 0 ? (
+          <p className="empty-note">Nothing due right now.</p>
+        ) : (
+          <ul className="due-list">
+            {due.map((entry) => <DueRow key={entry.id} entry={entry} />)}
+          </ul>
+        )}
+      </section>
+      <section className="section">
+        <h2 className="section-title">
+          Upcoming
+          {upcoming.length > 0 && <span className="section-count">{upcoming.length}</span>}
+        </h2>
+        {upcoming.length === 0 ? (
+          <p className="empty-note">Nothing coming up in the next 24 hours.</p>
+        ) : (
+          <ul className="due-list">
+            {upcoming.map((entry) => <DueRow key={entry.id} entry={entry} />)}
+          </ul>
+        )}
+      </section>
+    </>
+  );
+}
+```
+
+- [ ] **Step 4: Update `client/src/App.tsx`** — remove the wrapping
+`<div className="section">` around `<DuePanel />`, since it now
+supplies its own two `<section className="section">` elements:
+
+```tsx
+      <DuePanel refreshKey={dueRefreshKey} />
+```
+(replaces the previous `<div className="section"><DuePanel
+refreshKey={dueRefreshKey} /></div>` — everything else in `App.tsx` is
+unchanged.)
+
+- [ ] **Step 5: Run the tests to verify they pass**
+
+Run: `npm run test --workspace=client`
+Expected: all tests PASS, including `App.test.tsx`.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add client/src/DuePanel.tsx client/test/DuePanel.test.tsx client/src/App.tsx
+git commit -m "feat: split Due/Upcoming panel, show recurrence indicator"
+```
+
+---
+
+### Task 15: Filter and ascending sort on the Recent list
+
+**Files:**
+- Modify: `client/src/EntryList.tsx`
+- Modify: `client/test/EntryList.test.tsx`
+- Modify: `client/src/styles.css`
+
+**Interfaces:**
+- Consumes: `Entry.domain`/`remind_at`/`created_at` (existing).
+- Produces: no new exports — `EntryList` now filters/sorts the
+  `entries` prop internally before rendering; `onDelete`/`onEdit`
+  still receive the real entry `id`, so `App.tsx` needs no changes.
+
+- [ ] **Step 1: Write failing tests**
+
+Add to `client/test/EntryList.test.tsx`, inside `describe('EntryList', ...)`:
+```tsx
+  it('filters entries by domain when a filter pill is clicked', () => {
+    const workEntry: Entry = { ...entry, id: 3, domain: 'work', raw_text: 'write report' };
+    render(<EntryList entries={[entry, workEntry]} onDelete={() => {}} onEdit={() => {}} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /^work$/i }));
+
+    expect(screen.getByText('write report')).toBeInTheDocument();
+    expect(screen.queryByText('buy milk')).not.toBeInTheDocument();
+  });
+
+  it('shows all entries again when All is selected', () => {
+    const workEntry: Entry = { ...entry, id: 3, domain: 'work', raw_text: 'write report' };
+    render(<EntryList entries={[entry, workEntry]} onDelete={() => {}} onEdit={() => {}} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /^work$/i }));
+    fireEvent.click(screen.getByRole('button', { name: /^all$/i }));
+
+    expect(screen.getByText('buy milk')).toBeInTheDocument();
+    expect(screen.getByText('write report')).toBeInTheDocument();
+  });
+
+  it('sorts entries with a due date ascending before entries without one', () => {
+    const soon: Entry = { ...entry, id: 4, raw_text: 'soon-task', remind_at: '2020-01-01T00:00:00.000Z' };
+    const later: Entry = { ...entry, id: 5, raw_text: 'later-task', remind_at: '2020-06-01T00:00:00.000Z' };
+    const noDue: Entry = { ...entry, id: 6, raw_text: 'someday-task', remind_at: null };
+    render(<EntryList entries={[noDue, later, soon]} onDelete={() => {}} onEdit={() => {}} />);
+
+    const texts = screen.getAllByText(/-task/).map((el) => el.textContent);
+    expect(texts).toEqual(['soon-task', 'later-task', 'someday-task']);
+  });
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `npm run test --workspace=client`
+Expected: FAIL — no filter pills exist, and the list is unsorted
+(renders in prop order).
+
+- [ ] **Step 3: Implement filter and sort in `client/src/EntryList.tsx`**
+
+Add near the top of the file, after the existing `recurrenceLabel`
+function:
+```tsx
+const DOMAIN_FILTERS = ['all', ...DOMAINS] as const;
+type DomainFilter = (typeof DOMAIN_FILTERS)[number];
+
+function sortByDueThenRecent(entries: Entry[]): Entry[] {
+  return [...entries].sort((a, b) => {
+    if (a.remind_at && b.remind_at) return a.remind_at < b.remind_at ? -1 : a.remind_at > b.remind_at ? 1 : 0;
+    if (a.remind_at && !b.remind_at) return -1;
+    if (!a.remind_at && b.remind_at) return 1;
+    return a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0;
+  });
+}
+```
+
+Inside the `EntryList` component, add filter state and derive the
+list to render (replacing the direct `entries.map(...)` with
+`visible.map(...)`):
+```tsx
+  const [filter, setFilter] = useState<DomainFilter>('all');
+
+  if (entries.length === 0) {
+    return <p className="empty-note">Nothing captured yet — try the box above.</p>;
+  }
+
+  const filtered = filter === 'all' ? entries : entries.filter((e) => e.domain === filter);
+  const visible = sortByDueThenRecent(filtered);
+
+  return (
+    <>
+      <div className="filter-pills">
+        {DOMAIN_FILTERS.map((f) => (
+          <button
+            key={f}
+            className={`filter-pill${filter === f ? ' active' : ''}`}
+            onClick={() => setFilter(f)}
+          >
+            {f === 'all' ? 'All' : f[0].toUpperCase() + f.slice(1)}
+          </button>
+        ))}
+      </div>
+      {visible.length === 0 ? (
+        <p className="empty-note">No entries match this filter.</p>
+      ) : (
+        <ul className="entry-list">
+          {visible.map((entry) => {
+```
+(the existing per-entry `<li>` block — editing form, dot, text,
+recurrence indicator, meta, actions — is unchanged; only its
+surrounding closes need to switch from `</ul>` to also closing the new
+wrapping `</>` fragment: `})}\n        </ul>\n      )}\n    </>\n  );\n}`
+replaces the previous `})}\n    </ul>\n  );\n}` at the end of the file.)
+
+- [ ] **Step 4: Add filter pill styles to `client/src/styles.css`**
+
+Append:
+```css
+.filter-pills {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.filter-pill {
+  background: none;
+  border: 1px solid var(--hairline);
+  color: var(--text-muted);
+  font-size: 12.5px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.filter-pill:hover {
+  color: var(--text);
+}
+
+.filter-pill.active {
+  background: var(--surface-raised);
+  border-color: var(--accent-ring);
+  color: var(--text);
+}
+```
+
+- [ ] **Step 5: Run the tests to verify they pass**
+
+Run: `npm run test --workspace=client`
+Expected: all `EntryList.test.tsx` tests PASS.
+
+- [ ] **Step 6: Run the full test suite and TypeScript from repo root**
+
+Run: `npm test && cd client && npx tsc -b --noEmit && cd ../server && npx tsc -p tsconfig.json --noEmit`
+Expected: everything PASSes, no type errors.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add client/src/EntryList.tsx client/test/EntryList.test.tsx client/src/styles.css
+git commit -m "feat: add domain filter and due-date-ascending sort to Recent list"
+```
+
+## End-to-end manual verification (v1.1, after Task 15)
+
+1. `npm run dev`, open `http://localhost:5173`.
+2. Capture "pay rent $1500 on the 5th of every month" — confirm it
+   appears once, tagged `finance`, with a ↻ recurrence indicator.
+3. In the running server's SQLite file, manually set that entry's
+   `remind_at` to a past timestamp (or just wait), then refresh /
+   re-open the app — confirm a second "pay rent" entry appears with
+   next month's date, and the original still exists (both visible in
+   Recent, both searchable via Ask Genie).
+4. Confirm the home screen now shows separate **Due** and **Upcoming**
+   headings instead of one combined "Due / Upcoming".
+5. In Recent, click the domain filter pills — confirm the list narrows
+   to just that domain, and **All** restores everything.
+6. Confirm Recent entries with a due date appear before ones without,
+   soonest-due first.
+7. Edit a non-recurring entry, set "repeats" to Weekly, save — confirm
+   the ↻ indicator appears; edit it again, set back to "Doesn't
+   repeat", save — confirm the indicator disappears.

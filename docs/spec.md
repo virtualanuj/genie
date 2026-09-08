@@ -28,17 +28,20 @@ A single `entries` table covers all three domains — not per-domain
 tables — so reminders and search work uniformly across everything
 captured:
 
-| column        | type      | notes                                             |
-|---------------|-----------|----------------------------------------------------|
-| `id`          | integer   | primary key                                        |
-| `raw_text`    | text      | exactly what the user typed or the transcribed speech |
-| `domain`      | text      | `work` \| `finance` \| `personal`                  |
-| `type`        | text      | `task` \| `expense` \| `note` \| `reminder` \| `event` |
-| `structured`  | text/json | type-specific fields, e.g. `amount`/`currency`/`category` for expenses, `due_date`/`project` for tasks |
-| `tags`        | text      | optional, free-form, comma-separated                |
-| `remind_at`   | text/null | ISO timestamp, nullable                             |
-| `created_at`  | text      | ISO timestamp                                       |
-| `updated_at`  | text      | ISO timestamp                                       |
+| column          | type      | notes                                             |
+|-----------------|-----------|----------------------------------------------------|
+| `id`            | integer   | primary key                                        |
+| `raw_text`      | text      | exactly what the user typed or the transcribed speech |
+| `domain`        | text      | `work` \| `finance` \| `personal`                  |
+| `type`          | text      | `task` \| `expense` \| `note` \| `reminder` \| `event` |
+| `structured`    | text/json | type-specific fields, e.g. `amount`/`currency`/`category` for expenses, `due_date`/`project` for tasks |
+| `tags`          | text      | optional, free-form, comma-separated                |
+| `remind_at`     | text/null | ISO timestamp, nullable                             |
+| `recurrence`    | text/null | JSON, nullable — `{ freq: 'daily'\|'weekly'\|'monthly'\|'yearly', interval: number }` (v1.1) |
+| `series_id`     | int/null  | nullable — id of the original entry that started this recurring series; null on the original itself (v1.1) |
+| `spawned_next`  | boolean   | default false — whether this row has already produced its next occurrence (v1.1) |
+| `created_at`    | text      | ISO timestamp                                       |
+| `updated_at`    | text      | ISO timestamp                                       |
 
 ## Capture flow
 
@@ -48,7 +51,8 @@ captured:
    problem).
 2. On submit, the raw text is sent to the backend, which calls the
    Gemini API with a prompt instructing it to return `domain`, `type`,
-   and a `structured` JSON object matching the type.
+   a `structured` JSON object matching the type, and — v1.1 — an
+   optional `recurrence` pattern if the text implies one recurs.
 3. The entry is saved immediately (no confirmation step — nothing
    irreversible happens on save, matching the "organize + remind"
    autonomy level) and shown in a recent-entries list so the user can
@@ -61,6 +65,45 @@ A "Due / Upcoming" panel on the home screen queries entries where
 already overdue, or due within the next day. This 24-hour look-ahead
 window is fixed for v1 (not configurable per entry or globally). No
 push notifications — the user sees this when the app is open.
+
+As of v1.1, the panel splits that same fetch into two sections:
+**Due** (`remind_at <= now`) and **Upcoming** (`now < remind_at <=
+now + 24h`) — partitioned client-side from one fetch, not two
+API calls.
+
+## Recurrence (v1.1)
+
+An entry with a non-null `recurrence` represents a repeating
+task/event. Rather than overwriting `remind_at` in place when an
+occurrence comes due (which would destroy history search relies on),
+each occurrence is **materialized as its own independent entry**,
+linked back to the original via `series_id`. This keeps every past
+occurrence normal, searchable, editable, and deletable — recurrence
+is not a special case elsewhere in the app.
+
+Advancement is lazy, not a background job (the app isn't assumed to
+be always running): `advanceRecurringEntries()` runs at the top of
+`GET /api/entries` and `GET /api/entries/due`. For every row where
+`recurrence IS NOT NULL AND spawned_next = false AND remind_at <=
+now`, it inserts a new entry (same `raw_text`/`domain`/`type`/
+`structured`/`recurrence`, `remind_at` advanced by one `interval` of
+`freq`, `series_id` pointing at the series' original entry), then
+marks the source row `spawned_next = true` so it's never spawned
+twice. Deleting an entry before this check runs naturally stops the
+series — no separate "stop recurring" action is needed.
+
+Entries with `recurrence` set show a small recurrence indicator in
+the UI (`EntryList`, `DuePanel`).
+
+## Recent list: filter + sort (v1.1)
+
+The Recent entries list gets client-side (no API change — personal-
+scale data):
+- **Filter** by `domain` via pill buttons (All / Work / Finance /
+  Personal).
+- **Sort**: entries with `remind_at` set sort ascending (soonest due
+  first); entries without one follow, newest-first (matching v1's
+  original default for non-deadline captures).
 
 ## Search & Q&A
 
