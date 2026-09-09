@@ -73,10 +73,18 @@ synthesis.
   client-side routing, alongside the `/api` routes — no separate frontend
   server in production.
 
-- **Forced IPv4 DNS resolution.** `server/src/index.ts` calls
-  `setDefaultResultOrder('ipv4first')` because Gemini's hostname can
-  resolve to IPv6 in some environments and hang indefinitely instead of
-  erroring. This is a deliberate workaround, not incidental.
+- **Forced IPv4 for Gemini requests.** `server/src/index.ts` calls
+  `setDefaultResultOrder('ipv4first')` *and* `setGlobalDispatcher(new
+  Agent({ connect: { family: 4 } }))` (from `undici`) because Gemini's
+  hostname can resolve to IPv6 in some environments and hang or take
+  30-40+ seconds per request instead of erroring or falling back. The DNS
+  fix alone isn't sufficient: `@google/genai` calls the global `fetch`,
+  which does its own per-request dual-stack connection attempt and doesn't
+  reliably honor the DNS order, so the undici dispatcher forcing IPv4-only
+  sockets is the fix that actually matters; the DNS order change is kept
+  as defense-in-depth for other lookups. Both are deliberate workarounds,
+  not incidental — measured directly (see git history) at ~40s/request
+  without the dispatcher fix vs. sub-2s with it.
 
 - **Some list behavior is client-only, with no API surface.** The Recent
   list's domain filter and due-date-ascending sort, and the Due/Upcoming
