@@ -6,6 +6,7 @@ import {
   createEntry, getEntry, listEntries, listDueEntries, updateEntry, deleteEntry, advanceRecurringEntries,
   DOMAINS, TYPES, RECURRENCE_FREQS, isValidRecurrence,
 } from '../db.js';
+import { logPerf } from '../perfLog.js';
 
 function parseId(raw: string): number | undefined {
   const id = Number(raw);
@@ -24,8 +25,14 @@ export function entriesRouter(db: Database.Database, gemini: Pick<GoogleGenAI, '
     if (typeof rawText !== 'string' || rawText.trim() === '') {
       return res.status(400).json({ error: 'raw_text is required' });
     }
+    const start = performance.now();
+    let classifyMs: number | undefined;
     try {
+      const classifyStart = performance.now();
       const classified = await classifyEntry(gemini, rawText);
+      classifyMs = performance.now() - classifyStart;
+
+      const dbStart = performance.now();
       const entry = createEntry(db, {
         raw_text: rawText,
         domain: classified.domain,
@@ -34,8 +41,21 @@ export function entriesRouter(db: Database.Database, gemini: Pick<GoogleGenAI, '
         remind_at: classified.remind_at,
         recurrence: classified.recurrence,
       });
+      const dbMs = performance.now() - dbStart;
+
+      logPerf('capture', {
+        raw_text_len: rawText.length,
+        classify_ms: Math.round(classifyMs),
+        db_ms: Math.round(dbMs),
+        total_ms: Math.round(performance.now() - start),
+      });
       res.status(201).json(entry);
     } catch (err) {
+      logPerf('capture_failed', {
+        raw_text_len: rawText.length,
+        classify_ms: Math.round(classifyMs ?? performance.now() - start),
+        total_ms: Math.round(performance.now() - start),
+      });
       res.status(502).json({ error: 'classification failed', detail: (err as Error).message });
     }
   });

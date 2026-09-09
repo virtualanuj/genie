@@ -16,6 +16,48 @@ describe('search API', () => {
     expect(res.body.answer).toBe('You spent $50 on groceries.');
   });
 
+  it('POST /api/search logs a structured perf line on success', async () => {
+    const db = openDb(':memory:');
+    createEntry(db, { raw_text: 'bought groceries for $50', domain: 'finance', type: 'expense', structured: { amount: 50 } });
+    const gemini = { models: { generateContent: vi.fn().mockResolvedValue({ text: 'You spent $50 on groceries.' }) } };
+    const app = buildApp(db, gemini as never);
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await request(app).post('/api/search').send({ question: 'how much on groceries?' });
+
+    const perfLine = logSpy.mock.calls.map((c) => c[0]).find((line) => {
+      try { return JSON.parse(line).event === 'search'; } catch { return false; }
+    });
+    expect(perfLine).toBeDefined();
+    const parsed = JSON.parse(perfLine as string);
+    expect(parsed).toMatchObject({ event: 'search', question_len: 'how much on groceries?'.length });
+    expect(parsed.candidates).toBeTypeOf('number');
+    expect(parsed.filter_ms).toBeTypeOf('number');
+    expect(parsed.answer_ms).toBeTypeOf('number');
+    expect(parsed.total_ms).toBeTypeOf('number');
+
+    logSpy.mockRestore();
+  });
+
+  it('POST /api/search logs a search_failed perf line when answering fails', async () => {
+    const db = openDb(':memory:');
+    const gemini = { models: { generateContent: vi.fn().mockRejectedValue(new Error('boom')) } };
+    const app = buildApp(db, gemini as never);
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await request(app).post('/api/search').send({ question: 'anything?' });
+
+    const perfLine = logSpy.mock.calls.map((c) => c[0]).find((line) => {
+      try { return JSON.parse(line).event === 'search_failed'; } catch { return false; }
+    });
+    expect(perfLine).toBeDefined();
+    const parsed = JSON.parse(perfLine as string);
+    expect(parsed.filter_ms).toBeTypeOf('number');
+    expect(parsed.total_ms).toBeTypeOf('number');
+
+    logSpy.mockRestore();
+  });
+
   it('POST /api/search rejects an empty question', async () => {
     const app = buildApp(openDb(':memory:'), { models: { generateContent: vi.fn() } } as never);
     const res = await request(app).post('/api/search').send({ question: '' });
