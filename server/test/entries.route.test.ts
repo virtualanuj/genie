@@ -33,6 +33,17 @@ describe('entries API', () => {
     expect(res.status).toBe(400);
   });
 
+  it('POST /api/entries returns 502 when Gemini returns an unrecognized domain', async () => {
+    const gemini = mockGemini(JSON.stringify({ domain: 'shopping', type: 'task', structured: {}, remind_at: null }));
+    const app = buildApp(db, gemini as never);
+
+    const res = await request(app).post('/api/entries').send({ raw_text: 'buy stuff' });
+    expect(res.status).toBe(502);
+
+    const list = await request(app).get('/api/entries');
+    expect(list.body).toHaveLength(0);
+  });
+
   it('GET /api/entries lists saved entries', async () => {
     const gemini = mockGemini(JSON.stringify({ domain: 'personal', type: 'note', structured: {}, remind_at: null }));
     const app = buildApp(db, gemini as never);
@@ -163,7 +174,9 @@ describe('entries API', () => {
   });
 
   it('PATCH /api/entries/:id accepts a valid recurrence and clearing it', async () => {
-    const gemini = mockGemini(JSON.stringify({ domain: 'personal', type: 'note', structured: {}, remind_at: null }));
+    const gemini = mockGemini(JSON.stringify({
+      domain: 'personal', type: 'note', structured: {}, remind_at: '2026-01-05T00:00:00.000Z',
+    }));
     const app = buildApp(db, gemini as never);
     const created = await request(app).post('/api/entries').send({ raw_text: 'note' });
 
@@ -178,5 +191,35 @@ describe('entries API', () => {
       .send({ recurrence: null });
     expect(cleared.status).toBe(200);
     expect(cleared.body.recurrence).toBeNull();
+  });
+
+  it('PATCH /api/entries/:id rejects setting recurrence with no remind_at', async () => {
+    const gemini = mockGemini(JSON.stringify({ domain: 'personal', type: 'note', structured: {}, remind_at: null }));
+    const app = buildApp(db, gemini as never);
+    const created = await request(app).post('/api/entries').send({ raw_text: 'note' });
+
+    const res = await request(app)
+      .patch(`/api/entries/${created.body.id}`)
+      .send({ recurrence: { freq: 'weekly', interval: 2 } });
+
+    expect(res.status).toBe(400);
+  });
+
+  it('PATCH /api/entries/:id rejects an empty raw_text', async () => {
+    const gemini = mockGemini(JSON.stringify({ domain: 'personal', type: 'note', structured: {}, remind_at: null }));
+    const app = buildApp(db, gemini as never);
+    const created = await request(app).post('/api/entries').send({ raw_text: 'note' });
+
+    const res = await request(app).patch(`/api/entries/${created.body.id}`).send({ raw_text: '   ' });
+    expect(res.status).toBe(400);
+  });
+
+  it('PATCH /api/entries/:id rejects an unparseable remind_at', async () => {
+    const gemini = mockGemini(JSON.stringify({ domain: 'personal', type: 'note', structured: {}, remind_at: null }));
+    const app = buildApp(db, gemini as never);
+    const created = await request(app).post('/api/entries').send({ raw_text: 'note' });
+
+    const res = await request(app).patch(`/api/entries/${created.body.id}`).send({ remind_at: 'not-a-date' });
+    expect(res.status).toBe(400);
   });
 });

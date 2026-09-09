@@ -3,27 +3,17 @@ import type Database from 'better-sqlite3';
 import type { GoogleGenAI } from '@google/genai';
 import { classifyEntry } from '../gemini.js';
 import {
-  createEntry, listEntries, listDueEntries, updateEntry, deleteEntry, advanceRecurringEntries,
-  type Domain, type EntryType, type RecurrenceFreq,
+  createEntry, getEntry, listEntries, listDueEntries, updateEntry, deleteEntry, advanceRecurringEntries,
+  DOMAINS, TYPES, RECURRENCE_FREQS, isValidRecurrence,
 } from '../db.js';
-
-const DOMAINS: Domain[] = ['work', 'finance', 'personal'];
-const TYPES: EntryType[] = ['task', 'expense', 'note', 'reminder', 'event'];
-const RECURRENCE_FREQS: RecurrenceFreq[] = ['daily', 'weekly', 'monthly', 'yearly'];
 
 function parseId(raw: string): number | undefined {
   const id = Number(raw);
   return Number.isInteger(id) ? id : undefined;
 }
 
-function isValidRecurrence(value: unknown): boolean {
-  if (value === null) return true;
-  if (typeof value !== 'object') return false;
-  const v = value as Record<string, unknown>;
-  return (
-    typeof v.freq === 'string' && RECURRENCE_FREQS.includes(v.freq as RecurrenceFreq) &&
-    typeof v.interval === 'number' && v.interval > 0
-  );
+function isValidRemindAt(value: unknown): boolean {
+  return value === null || (typeof value === 'string' && !Number.isNaN(new Date(value).getTime()));
 }
 
 export function entriesRouter(db: Database.Database, gemini: Pick<GoogleGenAI, 'models'>): Router {
@@ -65,17 +55,31 @@ export function entriesRouter(db: Database.Database, gemini: Pick<GoogleGenAI, '
     const id = parseId(req.params.id);
     if (id === undefined) return res.status(400).json({ error: 'invalid id' });
 
+    const existing = getEntry(db, id);
+    if (!existing) return res.status(404).json({ error: 'not found' });
+
     const body = req.body ?? {};
+    if (body.raw_text !== undefined && (typeof body.raw_text !== 'string' || body.raw_text.trim() === '')) {
+      return res.status(400).json({ error: 'raw_text must be a non-empty string' });
+    }
     if (body.domain !== undefined && !DOMAINS.includes(body.domain)) {
       return res.status(400).json({ error: `domain must be one of ${DOMAINS.join(', ')}` });
     }
     if (body.type !== undefined && !TYPES.includes(body.type)) {
       return res.status(400).json({ error: `type must be one of ${TYPES.join(', ')}` });
     }
+    if (body.remind_at !== undefined && !isValidRemindAt(body.remind_at)) {
+      return res.status(400).json({ error: 'remind_at must be an ISO 8601 timestamp or null' });
+    }
     if (body.recurrence !== undefined && !isValidRecurrence(body.recurrence)) {
       return res.status(400).json({
         error: `recurrence must be null or { freq: ${RECURRENCE_FREQS.join('|')}, interval: positive number }`,
       });
+    }
+    const effectiveRemindAt = body.remind_at !== undefined ? body.remind_at : existing.remind_at;
+    const effectiveRecurrence = body.recurrence !== undefined ? body.recurrence : existing.recurrence;
+    if (effectiveRecurrence && !effectiveRemindAt) {
+      return res.status(400).json({ error: 'recurrence requires remind_at to be set' });
     }
 
     const updated = updateEntry(db, id, body);

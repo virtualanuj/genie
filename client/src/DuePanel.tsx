@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { listDueEntries, type Entry, type Recurrence } from './api.js';
+import { listDueEntries, recurrenceLabel, type Entry } from './api.js';
 
 function formatDue(iso: string): string {
   try {
@@ -8,16 +8,6 @@ function formatDue(iso: string): string {
     });
   } catch {
     return iso;
-  }
-}
-
-function recurrenceLabel(entry: Entry): string | null {
-  if (!entry.recurrence) return null;
-  try {
-    const r = JSON.parse(entry.recurrence) as Recurrence;
-    return r.interval > 1 ? `recurs every ${r.interval} ${r.freq}` : `recurs ${r.freq}`;
-  } catch {
-    return null;
   }
 }
 

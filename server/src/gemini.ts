@@ -1,5 +1,5 @@
 import type { GoogleGenAI } from '@google/genai';
-import type { Domain, EntryType, Recurrence } from './db.js';
+import { DOMAINS, TYPES, isValidRecurrence, type Domain, type EntryType, type Recurrence } from './db.js';
 
 export interface ClassifyResult {
   domain: Domain;
@@ -35,17 +35,28 @@ export async function classifyEntry(
   const response = await client.models.generateContent({
     model: 'gemini-flash-lite-latest',
     contents: rawText,
-    config: { systemInstruction },
+    config: { systemInstruction, responseMimeType: 'application/json' },
   });
 
   if (!response.text) throw new Error('Gemini response had no text content');
 
   const parsed = JSON.parse(response.text);
+  if (!DOMAINS.includes(parsed.domain)) {
+    throw new Error(`Gemini returned an unrecognized domain: ${parsed.domain}`);
+  }
+  if (!TYPES.includes(parsed.type)) {
+    throw new Error(`Gemini returned an unrecognized type: ${parsed.type}`);
+  }
+  // Drop rather than reject an unrecognized recurrence shape/freq (e.g. a
+  // synonym Gemini invents) -- it's a minor field, and letting a bad value
+  // through would otherwise silently break the recurrence engine later.
+  const recurrence: Recurrence | null = isValidRecurrence(parsed.recurrence) ? parsed.recurrence ?? null : null;
+
   return {
     domain: parsed.domain,
     type: parsed.type,
     structured: parsed.structured ?? {},
     remind_at: parsed.remind_at ?? null,
-    recurrence: parsed.recurrence ?? null,
+    recurrence,
   };
 }

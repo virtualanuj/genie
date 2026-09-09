@@ -18,6 +18,16 @@ export const RECURRENCE_FREQS = ['daily', 'weekly', 'monthly', 'yearly'] as cons
 export type RecurrenceFreq = (typeof RECURRENCE_FREQS)[number];
 export interface Recurrence { freq: RecurrenceFreq; interval: number }
 
+export function recurrenceLabel(entry: Pick<Entry, 'recurrence'>): string | null {
+  if (!entry.recurrence) return null;
+  try {
+    const r = JSON.parse(entry.recurrence) as Recurrence;
+    return r.interval > 1 ? `recurs every ${r.interval} ${r.freq}` : `recurs ${r.freq}`;
+  } catch {
+    return null;
+  }
+}
+
 export async function createEntry(rawText: string): Promise<Entry> {
   const res = await fetch('/api/entries', {
     method: 'POST',
@@ -57,7 +67,10 @@ export async function updateEntry(
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(fields),
   });
-  if (!res.ok) throw new Error(`failed to update entry: ${res.status}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(body?.error ?? `failed to update entry: ${res.status}`);
+  }
   return res.json();
 }
 

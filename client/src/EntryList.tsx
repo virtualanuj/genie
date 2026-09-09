@@ -1,18 +1,8 @@
 import { useState } from 'react';
-import { DOMAINS, TYPES, RECURRENCE_FREQS, type Entry, type Recurrence } from './api.js';
+import { DOMAINS, TYPES, RECURRENCE_FREQS, recurrenceLabel, type Entry, type Recurrence } from './api.js';
 
 type Draft = { raw_text: string; domain: Entry['domain']; type: Entry['type']; recurrence: Recurrence | null };
 type ViewMode = 'list' | 'card';
-
-function recurrenceLabel(entry: Entry): string | null {
-  if (!entry.recurrence) return null;
-  try {
-    const r = JSON.parse(entry.recurrence) as Recurrence;
-    return r.interval > 1 ? `recurs every ${r.interval} ${r.freq}` : `recurs ${r.freq}`;
-  } catch {
-    return null;
-  }
-}
 
 const DOMAIN_FILTERS = ['all', ...DOMAINS] as const;
 type DomainFilter = (typeof DOMAIN_FILTERS)[number];
@@ -31,15 +21,18 @@ export default function EntryList({
 }: {
   entries: Entry[];
   onDelete: (id: number) => void;
-  onEdit: (id: number, fields: Draft) => void;
+  onEdit: (id: number, fields: Draft) => Promise<void>;
 }) {
   const [editingId, setEditingId] = useState<number | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
   const [filter, setFilter] = useState<DomainFilter>('all');
   const [view, setView] = useState<ViewMode>('list');
 
   function startEdit(entry: Entry) {
     setEditingId(entry.id);
+    setSaveError(null);
     setDraft({
       raw_text: entry.raw_text,
       domain: entry.domain,
@@ -51,11 +44,21 @@ export default function EntryList({
   function cancelEdit() {
     setEditingId(null);
     setDraft(null);
+    setSaveError(null);
   }
 
-  function saveEdit() {
-    if (editingId !== null && draft) onEdit(editingId, draft);
-    cancelEdit();
+  async function saveEdit() {
+    if (editingId === null || !draft) return;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      await onEdit(editingId, draft);
+      cancelEdit();
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : 'Failed to save changes');
+    } finally {
+      setSaving(false);
+    }
   }
 
   if (entries.length === 0) {
@@ -144,8 +147,9 @@ export default function EntryList({
                       <option value="">Doesn&apos;t repeat</option>
                       {RECURRENCE_FREQS.map((f) => <option key={f} value={f}>{f}</option>)}
                     </select>
-                    <button className="btn-save" onClick={saveEdit}>Save</button>
+                    <button className="btn-save" onClick={saveEdit} disabled={saving}>Save</button>
                     <button className="btn-cancel" onClick={cancelEdit}>Cancel</button>
+                    {saveError && <span className="edit-error" role="alert">{saveError}</span>}
                   </div>
                 ) : (
                   <>

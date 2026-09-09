@@ -89,6 +89,31 @@ describe('db', () => {
     const cleared = updateEntry(db, entry.id, { recurrence: null });
     expect(cleared!.recurrence).toBeNull();
   });
+
+  it('updateEntry resets spawned_next when remind_at changes', () => {
+    const entry = createEntry(db, {
+      raw_text: 'pay rent', domain: 'finance', type: 'expense', structured: {},
+      remind_at: '2026-01-05T00:00:00.000Z',
+      recurrence: { freq: 'monthly', interval: 1 },
+    });
+    advanceRecurringEntries(db, '2026-01-06T00:00:00.000Z');
+    expect(getEntry(db, entry.id)!.spawned_next).toBe(1);
+
+    const updated = updateEntry(db, entry.id, { remind_at: '2026-03-01T00:00:00.000Z' });
+    expect(updated!.spawned_next).toBe(0);
+  });
+
+  it('updateEntry leaves spawned_next untouched when remind_at/recurrence are unchanged', () => {
+    const entry = createEntry(db, {
+      raw_text: 'pay rent', domain: 'finance', type: 'expense', structured: {},
+      remind_at: '2026-01-05T00:00:00.000Z',
+      recurrence: { freq: 'monthly', interval: 1 },
+    });
+    advanceRecurringEntries(db, '2026-01-06T00:00:00.000Z');
+
+    const updated = updateEntry(db, entry.id, { raw_text: 'pay rent (updated)' });
+    expect(updated!.spawned_next).toBe(1);
+  });
 });
 
 describe('advanceRecurringEntries', () => {
@@ -157,5 +182,42 @@ describe('advanceRecurringEntries', () => {
       recurrence: { freq: 'monthly', interval: 1 },
     });
     expect(advanceRecurringEntries(db, '2026-01-01T00:00:00.000Z')).toHaveLength(0);
+  });
+
+  it('clamps monthly recurrence to the target month\'s last valid day instead of overflowing', () => {
+    createEntry(db, {
+      raw_text: 'month-end bill', domain: 'finance', type: 'expense', structured: {},
+      remind_at: '2026-01-31T00:00:00.000Z',
+      recurrence: { freq: 'monthly', interval: 1 },
+    });
+    const [spawned] = advanceRecurringEntries(db, '2026-02-01T00:00:00.000Z');
+    expect(spawned.remind_at).toBe('2026-02-28T00:00:00.000Z');
+  });
+
+  it('stops the series instead of looping when recurrence freq is unrecognized', () => {
+    const source = createEntry(db, {
+      raw_text: 'bad freq', domain: 'finance', type: 'expense', structured: {},
+      remind_at: '2026-01-05T00:00:00.000Z',
+      recurrence: { freq: 'hourly' as never, interval: 1 },
+    });
+    const created = advanceRecurringEntries(db, '2026-01-06T00:00:00.000Z');
+    expect(created).toHaveLength(0);
+    expect(getEntry(db, source.id)!.spawned_next).toBe(1);
+    expect(advanceRecurringEntries(db, '2026-01-07T00:00:00.000Z')).toHaveLength(0);
+  });
+
+  it('stops the series instead of crashing when remind_at is unparseable', () => {
+    const source = createEntry(db, {
+      raw_text: 'bad date', domain: 'finance', type: 'expense', structured: {},
+      remind_at: '2026-01-05T00:00:00.000Z',
+      recurrence: { freq: 'monthly', interval: 1 },
+    });
+    // Lexicographically <= the "now" cutoff below (so the SQL due-filter still
+    // selects it) but unparseable as a Date, to exercise the guard itself.
+    db.prepare('UPDATE entries SET remind_at = ? WHERE id = ?').run('2020-01-01Xgarbage', source.id);
+
+    expect(() => advanceRecurringEntries(db, '2026-01-06T00:00:00.000Z')).not.toThrow();
+    expect(advanceRecurringEntries(db, '2026-01-06T00:00:00.000Z')).toHaveLength(0);
+    expect(getEntry(db, source.id)!.spawned_next).toBe(1);
   });
 });
