@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import request from 'supertest';
-import { openDb, createEntry } from '../src/db.js';
+import { openDb, createEntry, getEntry } from '../src/db.js';
 import { buildApp } from '../src/app.js';
 
 describe('search API', () => {
@@ -20,5 +20,20 @@ describe('search API', () => {
     const app = buildApp(openDb(':memory:'), { models: { generateContent: vi.fn() } } as never);
     const res = await request(app).post('/api/search').send({ question: '' });
     expect(res.status).toBe(400);
+  });
+
+  it('POST /api/search advances due recurring entries before searching', async () => {
+    const db = openDb(':memory:');
+    const source = createEntry(db, {
+      raw_text: 'pay rent', domain: 'finance', type: 'expense', structured: { amount: 1500 },
+      remind_at: '2020-01-05T00:00:00.000Z',
+      recurrence: { freq: 'monthly', interval: 1 },
+    });
+    const gemini = { models: { generateContent: vi.fn().mockResolvedValue({ text: 'Yes.' }) } };
+    const app = buildApp(db, gemini as never);
+
+    await request(app).post('/api/search').send({ question: 'did I pay rent?' });
+
+    expect(getEntry(db, source.id)!.spawned_next).toBe(1);
   });
 });

@@ -474,6 +474,17 @@ select {
   color: var(--text);
 }
 
+.btn-save:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.edit-error {
+  width: 100%;
+  color: #d94f4f;
+  font-size: 13px;
+}
+
 /* ---- search ---- */
 
 .search-form {

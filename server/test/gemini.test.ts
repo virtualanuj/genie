@@ -61,4 +61,31 @@ describe('classifyEntry', () => {
     const result = await classifyEntry(client, 'saw a nice sunset');
     expect(result.recurrence).toBeNull();
   });
+
+  it('throws when Gemini returns an unrecognized domain', async () => {
+    const client = mockClient(JSON.stringify({ domain: 'shopping', type: 'note', remind_at: null }));
+    await expect(classifyEntry(client, 'x')).rejects.toThrow('unrecognized domain');
+  });
+
+  it('throws when Gemini returns an unrecognized type', async () => {
+    const client = mockClient(JSON.stringify({ domain: 'personal', type: 'idea', remind_at: null }));
+    await expect(classifyEntry(client, 'x')).rejects.toThrow('unrecognized type');
+  });
+
+  it('drops an unrecognized recurrence shape instead of throwing', async () => {
+    const client = mockClient(JSON.stringify({
+      domain: 'personal', type: 'task', remind_at: '2026-01-05T00:00:00.000Z',
+      recurrence: { freq: 'hourly', interval: 1 },
+    }));
+    const result = await classifyEntry(client, 'x');
+    expect(result.recurrence).toBeNull();
+  });
+
+  it('requests JSON-only output from Gemini', async () => {
+    const client = mockClient(JSON.stringify({ domain: 'personal', type: 'note', remind_at: null }));
+    await classifyEntry(client, 'x');
+    expect(client.models.generateContent).toHaveBeenCalledWith(
+      expect.objectContaining({ config: expect.objectContaining({ responseMimeType: 'application/json' }) })
+    );
+  });
 });

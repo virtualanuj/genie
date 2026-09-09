@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import type Database from 'better-sqlite3';
 import type { GoogleGenAI } from '@google/genai';
-import { listEntries } from '../db.js';
+import { listEntries, advanceRecurringEntries } from '../db.js';
 import { filterCandidates, answerQuestion } from '../search.js';
 
 export function searchRouter(db: Database.Database, gemini: Pick<GoogleGenAI, 'models'>): Router {
@@ -11,6 +11,7 @@ export function searchRouter(db: Database.Database, gemini: Pick<GoogleGenAI, 'm
     if (typeof question !== 'string' || question.trim() === '') {
       return res.status(400).json({ error: 'question is required' });
     }
+    advanceRecurringEntries(db, new Date().toISOString());
     const candidates = filterCandidates(listEntries(db, 500), question);
     try {
       const answer = await answerQuestion(gemini, question, candidates);

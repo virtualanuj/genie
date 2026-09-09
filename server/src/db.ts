@@ -24,6 +24,20 @@ export interface Entry {
   updated_at: string;
 }
 
+export const DOMAINS: Domain[] = ['work', 'finance', 'personal'];
+export const TYPES: EntryType[] = ['task', 'expense', 'note', 'reminder', 'event'];
+export const RECURRENCE_FREQS: RecurrenceFreq[] = ['daily', 'weekly', 'monthly', 'yearly'];
+
+export function isValidRecurrence(value: unknown): value is Recurrence | null {
+  if (value === null) return true;
+  if (typeof value !== 'object') return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.freq === 'string' && RECURRENCE_FREQS.includes(v.freq as RecurrenceFreq) &&
+    typeof v.interval === 'number' && v.interval > 0
+  );
+}
+
 export interface NewEntry {
   raw_text: string;
   domain: Domain;
@@ -115,10 +129,17 @@ export function updateEntry(db: Database.Database, id: number, fields: Partial<N
       : existing.recurrence,
     updated_at: new Date().toISOString(),
   };
+  // Editing when the reminder fires or how it repeats should let the series
+  // fire again, even if the previous occurrence already spawned its successor.
+  const spawnedNext =
+    merged.remind_at !== existing.remind_at || merged.recurrence !== existing.recurrence
+      ? 0
+      : existing.spawned_next;
   db.prepare(`
     UPDATE entries SET raw_text=@raw_text, domain=@domain, type=@type, structured=@structured,
-      tags=@tags, remind_at=@remind_at, recurrence=@recurrence, updated_at=@updated_at WHERE id=@id
-  `).run(merged);
+      tags=@tags, remind_at=@remind_at, recurrence=@recurrence, spawned_next=@spawned_next, updated_at=@updated_at
+    WHERE id=@id
+  `).run({ ...merged, spawned_next: spawnedNext });
   return getEntry(db, id);
 }
 
@@ -129,6 +150,9 @@ export function deleteEntry(db: Database.Database, id: number): boolean {
 
 function advanceDate(iso: string, recurrence: Recurrence): string {
   const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) {
+    throw new Error(`cannot advance an invalid date: ${iso}`);
+  }
   switch (recurrence.freq) {
     case 'daily':
       date.setDate(date.getDate() + recurrence.interval);
@@ -137,11 +161,20 @@ function advanceDate(iso: string, recurrence: Recurrence): string {
       date.setDate(date.getDate() + recurrence.interval * 7);
       break;
     case 'monthly':
-      date.setMonth(date.getMonth() + recurrence.interval);
+    case 'yearly': {
+      // Move to the 1st before changing month/year so e.g. Jan 31 + 1 month
+      // can't overflow into March; then clamp back to the target month's
+      // last valid day (e.g. Feb 28/29) instead of drifting forward.
+      const day = date.getDate();
+      date.setDate(1);
+      if (recurrence.freq === 'monthly') date.setMonth(date.getMonth() + recurrence.interval);
+      else date.setFullYear(date.getFullYear() + recurrence.interval);
+      const daysInTargetMonth = new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
+      date.setDate(Math.min(day, daysInTargetMonth));
       break;
-    case 'yearly':
-      date.setFullYear(date.getFullYear() + recurrence.interval);
-      break;
+    }
+    default:
+      throw new Error(`unknown recurrence frequency: ${(recurrence as Recurrence).freq}`);
   }
   return date.toISOString();
 }
@@ -157,8 +190,18 @@ export function advanceRecurringEntries(db: Database.Database, nowISO: string): 
 
   const created: Entry[] = [];
   for (const source of due) {
-    const recurrence = JSON.parse(source.recurrence!) as Recurrence;
-    const nextRemindAt = advanceDate(source.remind_at!, recurrence);
+    let recurrence: Recurrence;
+    let nextRemindAt: string;
+    try {
+      recurrence = JSON.parse(source.recurrence!) as Recurrence;
+      nextRemindAt = advanceDate(source.remind_at!, recurrence);
+    } catch {
+      // Malformed recurrence or remind_at: stop this series rather than
+      // retrying (and re-failing) it on every future request, or spawning
+      // an unbounded pile of duplicate occurrences at the same timestamp.
+      db.prepare('UPDATE entries SET spawned_next = 1 WHERE id = ?').run(source.id);
+      continue;
+    }
     const seriesId = source.series_id ?? source.id;
 
     const spawned = createEntry(db, {
