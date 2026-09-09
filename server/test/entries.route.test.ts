@@ -27,6 +27,46 @@ describe('entries API', () => {
     expect(res.body.raw_text).toBe('finish the genie plan');
   });
 
+  it('POST /api/entries logs a structured perf line on success', async () => {
+    const gemini = mockGemini(JSON.stringify({
+      domain: 'work', type: 'task', structured: {}, remind_at: null,
+    }));
+    const app = buildApp(db, gemini as never);
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await request(app).post('/api/entries').send({ raw_text: 'finish the genie plan' });
+
+    const perfLine = logSpy.mock.calls.map((c) => c[0]).find((line) => {
+      try { return JSON.parse(line).event === 'capture'; } catch { return false; }
+    });
+    expect(perfLine).toBeDefined();
+    const parsed = JSON.parse(perfLine as string);
+    expect(parsed).toMatchObject({ event: 'capture', raw_text_len: 'finish the genie plan'.length });
+    expect(parsed.classify_ms).toBeTypeOf('number');
+    expect(parsed.db_ms).toBeTypeOf('number');
+    expect(parsed.total_ms).toBeTypeOf('number');
+
+    logSpy.mockRestore();
+  });
+
+  it('POST /api/entries logs a capture_failed perf line when classification fails', async () => {
+    const gemini = mockGemini(JSON.stringify({ domain: 'shopping', type: 'task', structured: {}, remind_at: null }));
+    const app = buildApp(db, gemini as never);
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await request(app).post('/api/entries').send({ raw_text: 'buy stuff' });
+
+    const perfLine = logSpy.mock.calls.map((c) => c[0]).find((line) => {
+      try { return JSON.parse(line).event === 'capture_failed'; } catch { return false; }
+    });
+    expect(perfLine).toBeDefined();
+    const parsed = JSON.parse(perfLine as string);
+    expect(parsed.classify_ms).toBeTypeOf('number');
+    expect(parsed.total_ms).toBeTypeOf('number');
+
+    logSpy.mockRestore();
+  });
+
   it('POST /api/entries rejects empty raw_text', async () => {
     const app = buildApp(db, mockGemini('{}') as never);
     const res = await request(app).post('/api/entries').send({ raw_text: '  ' });
