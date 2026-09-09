@@ -86,6 +86,14 @@ synthesis.
   not incidental — measured directly (see git history) at ~40s/request
   without the dispatcher fix vs. sub-2s with it.
 
+- **Structured performance logging on the two Gemini-backed routes.**
+  `POST /api/entries` and `POST /api/search` each log one JSON line via
+  `logPerf()` (`server/src/perfLog.ts`) per request — e.g.
+  `{"event":"capture","classify_ms":...,"db_ms":...,"total_ms":...}` — so
+  Gemini-call latency is visible in normal dev/prod logs. Simple SQLite-only
+  routes (`GET`/`PATCH`/`DELETE`) aren't instrumented; they're already known
+  sub-millisecond.
+
 - **Some list behavior is client-only, with no API surface.** The Recent
   list's domain filter and due-date-ascending sort, and the Due/Upcoming
   split, are all computed client-side from the existing `/api/entries` and
