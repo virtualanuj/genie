@@ -333,7 +333,9 @@ select {
 .entry-row:hover .entry-actions,
 .entry-row:focus-within .entry-actions,
 .entry-card:hover .entry-actions,
-.entry-card:focus-within .entry-actions {
+.entry-card:focus-within .entry-actions,
+.due-row:hover .entry-actions,
+.due-row:focus-within .entry-actions {
   opacity: 1;
 }
 
