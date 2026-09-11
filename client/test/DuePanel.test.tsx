@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { render, screen, waitFor, within, fireEvent } from '@testing-library/react';
 import DuePanel from '../src/DuePanel.js';
 import type { Entry } from '../src/api.js';
 
@@ -42,5 +42,21 @@ describe('DuePanel', () => {
     globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => [recurring] }) as never;
     render(<DuePanel />);
     await waitFor(() => expect(screen.getByTitle(/recurs monthly/i)).toBeInTheDocument());
+  });
+
+  it('shows a delete button for due and upcoming entries and calls onDelete with the entry id', async () => {
+    const past = entry({ id: 1, raw_text: 'pay rent', remind_at: new Date(Date.now() - 3600_000).toISOString() });
+    const future = entry({ id: 2, raw_text: 'call dentist', remind_at: new Date(Date.now() + 3600_000).toISOString() });
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => [past, future] }) as never;
+    const onDelete = vi.fn();
+
+    render(<DuePanel onDelete={onDelete} />);
+    await waitFor(() => expect(screen.getByText(/pay rent/)).toBeInTheDocument());
+
+    const deleteButtons = screen.getAllByRole('button', { name: /delete/i });
+    expect(deleteButtons).toHaveLength(2);
+
+    fireEvent.click(deleteButtons[0]);
+    expect(onDelete).toHaveBeenCalledWith(1);
   });
 });

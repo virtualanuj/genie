@@ -11,7 +11,7 @@ function formatDue(iso: string): string {
   }
 }
 
-function DueRow({ entry }: { entry: Entry }) {
+function DueRow({ entry, onDelete }: { entry: Entry; onDelete: (id: number) => void }) {
   const label = recurrenceLabel(entry);
   return (
     <li className="due-row">
@@ -19,11 +19,17 @@ function DueRow({ entry }: { entry: Entry }) {
       <span className="due-text">{entry.raw_text}</span>
       {label && <span className="recur-indicator" title={label} aria-hidden="true">↻</span>}
       <span className="due-time">{entry.remind_at ? formatDue(entry.remind_at) : ''}</span>
+      <span className="entry-actions">
+        <button className="btn-text btn-danger" onClick={() => onDelete(entry.id)}>Delete</button>
+      </span>
     </li>
   );
 }
 
-export default function DuePanel({ refreshKey }: { refreshKey?: number } = {}) {
+export default function DuePanel({
+  refreshKey,
+  onDelete = () => {},
+}: { refreshKey?: number; onDelete?: (id: number) => void } = {}) {
   const [entries, setEntries] = useState<Entry[] | null>(null);
 
   useEffect(() => {
@@ -47,7 +53,7 @@ export default function DuePanel({ refreshKey }: { refreshKey?: number } = {}) {
           <p className="empty-note">Nothing due right now.</p>
         ) : (
           <ul className="due-list">
-            {due.map((entry) => <DueRow key={entry.id} entry={entry} />)}
+            {due.map((entry) => <DueRow key={entry.id} entry={entry} onDelete={onDelete} />)}
           </ul>
         )}
       </section>
@@ -60,7 +66,7 @@ export default function DuePanel({ refreshKey }: { refreshKey?: number } = {}) {
           <p className="empty-note">Nothing coming up in the next 24 hours.</p>
         ) : (
           <ul className="due-list">
-            {upcoming.map((entry) => <DueRow key={entry.id} entry={entry} />)}
+            {upcoming.map((entry) => <DueRow key={entry.id} entry={entry} onDelete={onDelete} />)}
           </ul>
         )}
       </section>

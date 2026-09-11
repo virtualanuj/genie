@@ -161,8 +161,8 @@ export default function EntryList({
                     <div className="entry-footer">
                       <span className="type-label">{entry.type}</span>
                       <span className="entry-actions">
-                        <button className="btn-text" onClick={() => startEdit(entry)}>Edit</button>
-                        <button className="btn-text" onClick={() => onDelete(entry.id)}>Delete</button>
+                        <button className="btn-text btn-accent" onClick={() => startEdit(entry)}>Edit</button>
+                        <button className="btn-text btn-danger" onClick={() => onDelete(entry.id)}>Delete</button>
                       </span>
                     </div>
                   </>

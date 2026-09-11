@@ -27,11 +27,18 @@ export default function App() {
         }}
       />
 
-      <DuePanel refreshKey={dueRefreshKey} />
+      <DuePanel
+        refreshKey={dueRefreshKey}
+        onDelete={async (id) => {
+          await deleteEntry(id);
+          setEntries((prev) => prev.filter((e) => e.id !== id));
+          setDueRefreshKey((k) => k + 1);
+        }}
+      />
 
       <section className="section">
         <h2 className="section-title">
-          Recent
+          Tasks
           {entries.length > 0 && <span className="section-count">{entries.length}</span>}
         </h2>
         <EntryList
