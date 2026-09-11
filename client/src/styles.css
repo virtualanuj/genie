@@ -9,6 +9,8 @@
   --accent: #e8b04b;
   --accent-soft: #e8b04b26;
   --accent-ring: #e8b04b66;
+  --danger: #d94f4f;
+  --danger-soft: #d94f4f26;
 
   --domain-work: #5fa8a0;
   --domain-finance: #c98b5e;
@@ -234,6 +236,11 @@ select {
   font-size: 12.5px;
 }
 
+.due-row .entry-actions {
+  margin-left: auto;
+  padding-left: 10px;
+}
+
 /* ---- entry list ---- */
 
 .list-controls {
@@ -420,6 +427,15 @@ select {
 .btn-text:hover {
   color: var(--text);
   background: var(--surface-raised);
+}
+
+.btn-danger {
+  color: var(--danger);
+}
+
+.btn-danger:hover {
+  color: var(--danger);
+  background: var(--danger-soft);
 }
 
 .entry-edit-row {

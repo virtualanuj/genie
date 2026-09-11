@@ -20,7 +20,7 @@ function DueRow({ entry, onDelete }: { entry: Entry; onDelete: (id: number) => v
       {label && <span className="recur-indicator" title={label} aria-hidden="true">↻</span>}
       <span className="due-time">{entry.remind_at ? formatDue(entry.remind_at) : ''}</span>
       <span className="entry-actions">
-        <button className="btn-text" onClick={() => onDelete(entry.id)}>Delete</button>
+        <button className="btn-text btn-danger" onClick={() => onDelete(entry.id)}>Delete</button>
       </span>
     </li>
   );
