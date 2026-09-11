@@ -38,7 +38,7 @@ export default function App() {
 
       <section className="section">
         <h2 className="section-title">
-          Recent
+          Tasks
           {entries.length > 0 && <span className="section-count">{entries.length}</span>}
         </h2>
         <EntryList
