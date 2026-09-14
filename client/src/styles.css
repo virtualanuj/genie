@@ -636,3 +636,102 @@ select {
   border-color: var(--accent-ring);
   color: var(--text);
 }
+
+/* ---- tabs ---- */
+
+.tab-bar {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.tab {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 10px 14px;
+  color: var(--text-muted);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.tab:hover { color: var(--text); }
+.tab-active { color: var(--text); border-bottom-color: var(--accent); }
+
+/* ---- business triage ---- */
+
+.triage-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  padding: 12px;
+}
+
+.triage-form:focus-within {
+  border-color: var(--accent-ring);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.triage-input {
+  background: transparent;
+  border: none;
+  resize: vertical;
+  color: var(--text);
+  font: inherit;
+  font-size: 15px;
+}
+
+.triage-input:focus { outline: none; }
+
+.triage-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 12px;
+}
+
+.message-list { list-style: none; margin: 0; padding: 0; }
+
+.message-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.message-main { flex: 1; min-width: 0; }
+.message-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.message-summary { margin: 6px 0 2px; color: var(--text); }
+.message-reason { margin: 0; color: var(--text-muted); font-size: 13px; }
+.message-sender { color: var(--text-faint); font-size: 12px; }
+.message-done .message-summary { color: var(--text-faint); text-decoration: line-through; }
+.message-raw summary { color: var(--text-faint); font-size: 12px; cursor: pointer; margin-top: 6px; }
+.message-raw pre { white-space: pre-wrap; color: var(--text-muted); font: inherit; font-size: 13px; }
+
+.priority-badge,
+.category-chip {
+  border: none;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+select.priority-badge { appearance: none; cursor: pointer; }
+.priority-urgent { background: var(--danger); color: #fff; }
+.priority-high { background: var(--danger-soft); color: var(--danger); }
+.priority-medium { background: var(--accent-soft); color: var(--accent); }
+.priority-low { background: var(--surface-raised); color: var(--text-muted); }
+.category-chip { background: var(--surface-raised); color: var(--text-muted); }
+.edited-marker { color: var(--text-faint); font-size: 11px; font-style: italic; }
+.row-error { display: block; margin-top: 6px; color: var(--danger); font-size: 12px; }
+
+.done-section summary { cursor: pointer; }
