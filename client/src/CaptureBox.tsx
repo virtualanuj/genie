@@ -1,18 +1,6 @@
 import { useState } from 'react';
 import { createEntry, type Entry } from './api.js';
-
-type SpeechRecognitionLike = {
-  onresult: ((event: { results: { 0: { transcript: string } }[] }) => void) | null;
-  start: () => void;
-};
-
-function getSpeechRecognition(): (new () => SpeechRecognitionLike) | undefined {
-  const w = window as unknown as {
-    SpeechRecognition?: new () => SpeechRecognitionLike;
-    webkitSpeechRecognition?: new () => SpeechRecognitionLike;
-  };
-  return w.SpeechRecognition ?? w.webkitSpeechRecognition;
-}
+import { getSpeechRecognition } from './speech.js';
 
 export default function CaptureBox({ onCaptured }: { onCaptured: (entry: Entry) => void }) {
   const [text, setText] = useState('');
