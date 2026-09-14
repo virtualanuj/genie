@@ -25,6 +25,12 @@
 - **v1.1 (Tasks 11-15):** a recurring entry's occurrences are never overwritten in place — each occurrence is its own row, linked via `series_id`, so history stays searchable (per spec.md's Recurrence section).
 - Recurrence advancement (`advanceRecurringEntries`) is lazy — triggered by `GET /api/entries` and `GET /api/entries/due` — never a background job/cron.
 - Recurrence shape everywhere (Gemini prompt, DB, API, client): `{ freq: 'daily'|'weekly'|'monthly'|'yearly', interval: number }`, stored as nullable JSON text, same convention as `structured`.
+- **v1.2 (Tasks 16-20):** business messages live in their own `business_messages` table and must never touch `entries`, search, or recurrence — no changes to `entriesRouter`, `search.ts`, or `advanceRecurringEntries`.
+- `category` is AI-assigned only. `PATCH /api/business-messages/:id` accepts only `status` and/or `priority`, and any `priority` in the body sets `priority_overridden = 1`.
+- Text sent to Gemini for triage is always `redactSensitive(raw_text).slice(0, MAX_TRIAGE_CHARS)` (1000), computed inside `triageBusinessMessage`. Never send raw text. `raw_text` is stored unredacted.
+- Spam (`category = 'spam'`) is saved with `status = 'done'`.
+- Naming: everything is "business message" — `business_messages` table, `/api/business-messages`, `BusinessMessage` type, `*BusinessMessage*` functions, `businessMessages.*` files.
+- Enums everywhere (Gemini prompt, DB, API, client): category `request|question|complaint|sales_lead|fyi|spam`; priority `urgent|high|medium|low` (that order is the sort rank); status `open|done`.
 
 ---
 
@@ -3147,3 +3153,1468 @@ git commit -m "feat: add domain filter and due-date-ascending sort to Recent lis
 7. Edit a non-recurring entry, set "repeats" to Weekly, save — confirm
    the ↻ indicator appears; edit it again, set back to "Doesn't
    repeat", save — confirm the indicator disappears.
+
+---
+
+# v1.2 — Business Message Triage
+
+**Spec:** `docs/spec.md`'s "Business message triage (v1.2)" section
+(requirements: `docs/intent.md`'s v1.2 goals, non-goals, and success
+criteria).
+
+**Branch:** `feat/business-triage` (never commit to `main`).
+
+### Task 16: `business_messages` table and data-access functions
+
+**Files:**
+- Modify: `server/src/db.ts`
+- Create: `server/test/businessMessages.db.test.ts`
+
+**Interfaces:**
+- Consumes: nothing new.
+- Produces: `BusinessMessageCategory`/`Priority`/`BusinessMessageStatus`
+  types, `BUSINESS_MESSAGE_CATEGORIES`/`PRIORITIES`/
+  `BUSINESS_MESSAGE_STATUSES`, `BusinessMessage`/`NewBusinessMessage`/
+  `BusinessMessageUpdate`, `createBusinessMessage(db, m)`,
+  `getBusinessMessage(db, id)`, `listBusinessMessages(db)`,
+  `updateBusinessMessage(db, id, fields)`, `deleteBusinessMessage(db, id)`
+  — used by Tasks 18 and 19.
+
+- [ ] **Step 1: Write failing tests**
+
+Create `server/test/businessMessages.db.test.ts`:
+```ts
+import { describe, it, expect, beforeEach } from 'vitest';
+import type Database from 'better-sqlite3';
+import {
+  openDb, createBusinessMessage, getBusinessMessage, listBusinessMessages, updateBusinessMessage,
+  deleteBusinessMessage, listEntries, type NewBusinessMessage,
+} from '../src/db.js';
+
+const base: NewBusinessMessage = {
+  raw_text: 'Hi, our invoice is wrong. Call me on 555-123-4567.',
+  category: 'complaint',
+  priority: 'high',
+  priority_reason: 'Customer billing issue awaiting a reply',
+  summary: 'Customer reports incorrect invoice',
+  sender: 'Acme Corp',
+};
+
+describe('business messages db', () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = openDb(':memory:');
+  });
+
+  it('creates a message with status open, no override, and timestamps', () => {
+    const m = createBusinessMessage(db, base);
+    expect(m).toMatchObject({ ...base, status: 'open', priority_overridden: 0 });
+    expect(m.id).toBeGreaterThan(0);
+    expect(m.created_at).toBe(m.updated_at);
+    expect(getBusinessMessage(db, m.id)).toEqual(m);
+  });
+
+  it('saves spam as done', () => {
+    expect(createBusinessMessage(db, { ...base, category: 'spam', priority: 'low' }).status).toBe('done');
+  });
+
+  it('stores a null sender when omitted', () => {
+    const { sender: _omit, ...noSender } = base;
+    expect(createBusinessMessage(db, noSender).sender).toBeNull();
+  });
+
+  it('lists open before done, then by priority rank, then newest first', () => {
+    const lowOld = createBusinessMessage(db, { ...base, priority: 'low' });
+    const urgent = createBusinessMessage(db, { ...base, priority: 'urgent' });
+    const lowNew = createBusinessMessage(db, { ...base, priority: 'low' });
+    const doneUrgent = createBusinessMessage(db, { ...base, priority: 'urgent' });
+    updateBusinessMessage(db, doneUrgent.id, { status: 'done' });
+    const medium = createBusinessMessage(db, { ...base, priority: 'medium' });
+
+    expect(listBusinessMessages(db).map((m) => m.id))
+      .toEqual([urgent.id, medium.id, lowNew.id, lowOld.id, doneUrgent.id]);
+  });
+
+  it('updating status leaves priority and the override flag alone', () => {
+    const m = createBusinessMessage(db, base);
+    const done = updateBusinessMessage(db, m.id, { status: 'done' })!;
+    expect(done).toMatchObject({ status: 'done', priority: 'high', priority_overridden: 0 });
+    expect(done.updated_at >= m.updated_at).toBe(true);
+  });
+
+  it('updating priority sets priority_overridden, even to the same value', () => {
+    const m = createBusinessMessage(db, base);
+    expect(updateBusinessMessage(db, m.id, { priority: 'urgent' })).toMatchObject({ priority: 'urgent', priority_overridden: 1 });
+
+    const other = createBusinessMessage(db, base);
+    expect(updateBusinessMessage(db, other.id, { priority: 'high' })!.priority_overridden).toBe(1);
+  });
+
+  it('updateBusinessMessage returns undefined for a missing id', () => {
+    expect(updateBusinessMessage(db, 9999, { status: 'done' })).toBeUndefined();
+  });
+
+  it('deleteBusinessMessage removes the row and reports whether it existed', () => {
+    const m = createBusinessMessage(db, base);
+    expect(deleteBusinessMessage(db, m.id)).toBe(true);
+    expect(getBusinessMessage(db, m.id)).toBeUndefined();
+    expect(deleteBusinessMessage(db, m.id)).toBe(false);
+  });
+
+  it('does not leak business messages into entries', () => {
+    createBusinessMessage(db, base);
+    expect(listEntries(db)).toEqual([]);
+  });
+});
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `npm run test --workspace=server -- test/businessMessages.db.test.ts`
+Expected: FAIL — `createBusinessMessage` etc. are not exported.
+
+- [ ] **Step 3: Implement in `server/src/db.ts`**
+
+Add after the `NewEntry` interface:
+```ts
+export type BusinessMessageCategory = 'request' | 'question' | 'complaint' | 'sales_lead' | 'fyi' | 'spam';
+export type Priority = 'urgent' | 'high' | 'medium' | 'low';
+export type BusinessMessageStatus = 'open' | 'done';
+
+export const BUSINESS_MESSAGE_CATEGORIES: BusinessMessageCategory[] = [
+  'request', 'question', 'complaint', 'sales_lead', 'fyi', 'spam',
+];
+// Order is the sort rank: urgent first.
+export const PRIORITIES: Priority[] = ['urgent', 'high', 'medium', 'low'];
+export const BUSINESS_MESSAGE_STATUSES: BusinessMessageStatus[] = ['open', 'done'];
+
+export interface BusinessMessage {
+  id: number;
+  raw_text: string;
+  category: BusinessMessageCategory;
+  priority: Priority;
+  priority_overridden: 0 | 1;
+  priority_reason: string;
+  summary: string;
+  sender: string | null;
+  status: BusinessMessageStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface NewBusinessMessage {
+  raw_text: string;
+  category: BusinessMessageCategory;
+  priority: Priority;
+  priority_reason: string;
+  summary: string;
+  sender?: string | null;
+}
+
+export interface BusinessMessageUpdate {
+  status?: BusinessMessageStatus;
+  priority?: Priority;
+}
+```
+
+In `openDb`, after the entries migration loop and before `return db;`:
+```ts
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS business_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      raw_text TEXT NOT NULL,
+      category TEXT NOT NULL,
+      priority TEXT NOT NULL,
+      priority_overridden INTEGER NOT NULL DEFAULT 0,
+      priority_reason TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      sender TEXT,
+      status TEXT NOT NULL DEFAULT 'open',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `);
+```
+
+Append at the end of the file:
+```ts
+export function createBusinessMessage(db: Database.Database, m: NewBusinessMessage): BusinessMessage {
+  const now = new Date().toISOString();
+  const result = db.prepare(`
+    INSERT INTO business_messages (raw_text, category, priority, priority_reason, summary, sender, status, created_at, updated_at)
+    VALUES (@raw_text, @category, @priority, @priority_reason, @summary, @sender, @status, @now, @now)
+  `).run({
+    ...m,
+    sender: m.sender ?? null,
+    // Spam files itself away as done (intent.md v1.2); the user can reopen it.
+    status: m.category === 'spam' ? 'done' : 'open',
+    now,
+  });
+  return getBusinessMessage(db, Number(result.lastInsertRowid))!;
+}
+
+export function getBusinessMessage(db: Database.Database, id: number): BusinessMessage | undefined {
+  return db.prepare('SELECT * FROM business_messages WHERE id = ?').get(id) as BusinessMessage | undefined;
+}
+
+export function listBusinessMessages(db: Database.Database): BusinessMessage[] {
+  return db.prepare(`
+    SELECT * FROM business_messages
+    ORDER BY
+      CASE status WHEN 'open' THEN 0 ELSE 1 END,
+      CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
+      created_at DESC,
+      id DESC
+  `).all() as BusinessMessage[];
+}
+
+export function updateBusinessMessage(
+  db: Database.Database,
+  id: number,
+  fields: BusinessMessageUpdate
+): BusinessMessage | undefined {
+  const existing = getBusinessMessage(db, id);
+  if (!existing) return undefined;
+  db.prepare(`
+    UPDATE business_messages
+    SET status = @status, priority = @priority, priority_overridden = @priority_overridden, updated_at = @updated_at
+    WHERE id = @id
+  `).run({
+    id,
+    status: fields.status ?? existing.status,
+    priority: fields.priority ?? existing.priority,
+    priority_overridden: fields.priority !== undefined ? 1 : existing.priority_overridden,
+    updated_at: new Date().toISOString(),
+  });
+  return getBusinessMessage(db, id);
+}
+
+export function deleteBusinessMessage(db: Database.Database, id: number): boolean {
+  return db.prepare('DELETE FROM business_messages WHERE id = ?').run(id).changes > 0;
+}
+```
+
+(`id DESC` breaks ties between rows created in the same millisecond,
+which the sort test relies on.)
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `npm run test --workspace=server`
+Expected: PASS, including all pre-existing `db.test.ts` tests.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add server/src/db.ts server/test/businessMessages.db.test.ts
+git commit -m "feat(server): add business_messages table for business triage"
+```
+
+---
+
+### Task 17: `redactSensitive` helper
+
+**Files:**
+- Create: `server/src/redact.ts`
+- Create: `server/test/redact.test.ts`
+
+**Interfaces:**
+- Consumes: nothing.
+- Produces: `redactSensitive(text): string`, `MAX_TRIAGE_CHARS` — used
+  by Task 18.
+
+- [ ] **Step 1: Write failing tests**
+
+Create `server/test/redact.test.ts`:
+```ts
+import { describe, it, expect } from 'vitest';
+import { redactSensitive, MAX_TRIAGE_CHARS } from '../src/redact.js';
+
+describe('redactSensitive', () => {
+  it('redacts email addresses', () => {
+    expect(redactSensitive('Reach me at jane.doe+sales@globex.co.uk or ops@acme.io.'))
+      .toBe('Reach me at [EMAIL] or [EMAIL].');
+  });
+
+  it('redacts international phone numbers', () => {
+    expect(redactSensitive('UK office +44 20 7946 0958, US +1 (555) 123-4567.'))
+      .toBe('UK office [PHONE], US [PHONE].');
+  });
+
+  it('redacts North American local phone formats', () => {
+    expect(redactSensitive('Call (555) 123-4567 or 555-123-4567 or 555.123.4567 or 555 123 4567'))
+      .toBe('Call [PHONE] or [PHONE] or [PHONE] or [PHONE]');
+  });
+
+  it('redacts card and account-like long numbers', () => {
+    expect(redactSensitive('Card 4111 1111 1111 1111, card 4111-1111-1111-1111, acct 123456789012'))
+      .toBe('Card [NUMBER], card [NUMBER], acct [NUMBER]');
+  });
+
+  it('leaves short numbers, amounts, times, dates, and invoice ids alone', () => {
+    const text = 'Quote for 50 seats by Friday 3pm, total $12,500.00, invoice INV-2026-0042, meeting 2026-09-14 10:30, order #48213';
+    expect(redactSensitive(text)).toBe(text);
+  });
+
+  it('does not redact names', () => {
+    expect(redactSensitive('Thanks, Raj Patel at Globex')).toBe('Thanks, Raj Patel at Globex');
+  });
+
+  it('exposes a 1000-char triage limit', () => {
+    expect(MAX_TRIAGE_CHARS).toBe(1000);
+  });
+});
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `npm run test --workspace=server -- test/redact.test.ts`
+Expected: FAIL — module not found.
+
+- [ ] **Step 3: Create `server/src/redact.ts`**
+
+```ts
+// Only the first MAX_TRIAGE_CHARS of *redacted* text are sent to Gemini.
+export const MAX_TRIAGE_CHARS = 1000;
+
+const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+// Leading + and country code: +44 20 7946 0958, +1 (555) 123-4567.
+const INTL_PHONE = /\+\d{1,3}(?:[\s.-]?\(?\d{1,4}\)?){2,5}/g;
+// 12+ digits, optionally separated by single spaces/dashes: cards, account numbers.
+const LONG_NUMBER = /\b\d(?:[ -]?\d){11,}\b/g;
+// North American local: (555) 123-4567, 555-123-4567, 555.123.4567, 555 123 4567.
+const LOCAL_PHONE = /(?:\(\d{3}\)\s?|\b\d{3}[\s.-])\d{3}[\s.-]\d{4}\b/g;
+
+// Regex-based, not a PII detector: see spec.md "Redaction and truncation"
+// for what is deliberately left alone (names, short numbers, dates).
+export function redactSensitive(text: string): string {
+  return text
+    .replace(EMAIL, '[EMAIL]')
+    .replace(INTL_PHONE, '[PHONE]')
+    .replace(LONG_NUMBER, '[NUMBER]')
+    .replace(LOCAL_PHONE, '[PHONE]');
+}
+```
+
+Order matters: international phones are matched before long numbers,
+so `+44 20 7946 0958` (12 digits) becomes `[PHONE]`, not `[NUMBER]`.
+If a test case fails because of a regex edge case, adjust the regex
+and keep the test's expectation. The tests are the contract.
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `npm run test --workspace=server`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add server/src/redact.ts server/test/redact.test.ts
+git commit -m "feat(server): add redactSensitive for business triage"
+```
+
+---
+
+### Task 18: `triageBusinessMessage` Gemini classifier
+
+**Files:**
+- Modify: `server/src/gemini.ts`
+- Create: `server/test/triage.gemini.test.ts`
+
+**Interfaces:**
+- Consumes: `BUSINESS_MESSAGE_CATEGORIES`, `PRIORITIES`,
+  `BusinessMessageCategory`, `Priority` (Task 16); `redactSensitive`,
+  `MAX_TRIAGE_CHARS` (Task 17).
+- Produces: `TriageResult`,
+  `triageBusinessMessage(client, rawText): Promise<TriageResult>` —
+  used by Task 19's POST handler.
+
+- [ ] **Step 1: Write failing tests**
+
+Create `server/test/triage.gemini.test.ts`:
+```ts
+import { describe, it, expect, vi } from 'vitest';
+import { triageBusinessMessage } from '../src/gemini.js';
+
+function mockClient(responseText: string | undefined) {
+  return { models: { generateContent: vi.fn().mockResolvedValue({ text: responseText }) } };
+}
+
+const ok = JSON.stringify({
+  category: 'complaint',
+  priority: 'urgent',
+  priority_reason: 'Customer threatening to cancel',
+  summary: 'Acme says the product has been down all day',
+  sender: 'Acme Corp',
+});
+
+function sentContents(client: ReturnType<typeof mockClient>): string {
+  return client.models.generateContent.mock.calls[0][0].contents;
+}
+
+describe('triageBusinessMessage', () => {
+  it('parses a well-formed triage response', async () => {
+    const client = mockClient(ok);
+    const result = await triageBusinessMessage(client, 'We have been down all day, fix it or we cancel. - Acme');
+
+    expect(result).toEqual({
+      category: 'complaint',
+      priority: 'urgent',
+      priority_reason: 'Customer threatening to cancel',
+      summary: 'Acme says the product has been down all day',
+      sender: 'Acme Corp',
+    });
+    expect(client.models.generateContent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: 'gemini-flash-lite-latest',
+        config: expect.objectContaining({ responseMimeType: 'application/json' }),
+      })
+    );
+  });
+
+  it('never sends emails or phone numbers to Gemini', async () => {
+    const client = mockClient(ok);
+    await triageBusinessMessage(client, 'Email dana@acme.com or call +1 (555) 123-4567 / 555-987-6543');
+
+    const sent = sentContents(client);
+    expect(sent).not.toContain('dana@acme.com');
+    expect(sent).not.toMatch(/555/);
+    expect(sent).toBe('Email [EMAIL] or call [PHONE] / [PHONE]');
+  });
+
+  it('sends at most 1000 characters, redacting before truncating', async () => {
+    const client = mockClient(ok);
+    // The email straddles the 1000-char boundary: truncating first would leak "dana@ac".
+    const text = 'a'.repeat(995) + ' dana@acme.com ' + 'b'.repeat(2000);
+    await triageBusinessMessage(client, text);
+
+    const sent = sentContents(client);
+    expect(sent).toHaveLength(1000);
+    expect(sent).not.toContain('dana@');
+  });
+
+  it('defaults missing summary/priority_reason to empty strings and a non-string sender to null', async () => {
+    const client = mockClient(JSON.stringify({ category: 'fyi', priority: 'low', sender: 42 }));
+    const result = await triageBusinessMessage(client, 'newsletter');
+    expect(result).toMatchObject({ summary: '', priority_reason: '', sender: null });
+  });
+
+  it('throws on an unrecognized category', async () => {
+    const client = mockClient(JSON.stringify({ category: 'invoice', priority: 'low' }));
+    await expect(triageBusinessMessage(client, 'x')).rejects.toThrow('unrecognized category');
+  });
+
+  it('throws on an unrecognized priority', async () => {
+    const client = mockClient(JSON.stringify({ category: 'fyi', priority: 'p1' }));
+    await expect(triageBusinessMessage(client, 'x')).rejects.toThrow('unrecognized priority');
+  });
+
+  it('throws when the response has no text content', async () => {
+    await expect(triageBusinessMessage(mockClient(undefined), 'x')).rejects.toThrow('no text content');
+  });
+});
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `npm run test --workspace=server -- test/triage.gemini.test.ts`
+Expected: FAIL — `triageBusinessMessage` is not exported.
+
+- [ ] **Step 3: Implement in `server/src/gemini.ts`**
+
+Extend the import from `./db.js` with
+`BUSINESS_MESSAGE_CATEGORIES, PRIORITIES, type BusinessMessageCategory, type Priority`,
+add `import { redactSensitive, MAX_TRIAGE_CHARS } from './redact.js';`,
+then append:
+```ts
+export interface TriageResult {
+  category: BusinessMessageCategory;
+  priority: Priority;
+  priority_reason: string;
+  summary: string;
+  sender: string | null;
+}
+
+const TRIAGE_SYSTEM_PROMPT = `You triage inbound business messages (emails, chat messages, customer notes) so the reader knows what to respond to first.
+
+Contact details have been replaced with placeholders: [EMAIL], [PHONE], [NUMBER]. Treat them as present but unknown. The message may be cut off after ${MAX_TRIAGE_CHARS} characters.
+
+Respond with ONLY a JSON object, no other text, matching this shape:
+{
+  "category": "request" | "question" | "complaint" | "sales_lead" | "fyi" | "spam",
+  "priority": "urgent" | "high" | "medium" | "low",
+  "priority_reason": "<one short sentence explaining the priority>",
+  "summary": "<one-line summary of the message>",
+  "sender": "<sender name or organization if identifiable from the text, otherwise null>"
+}
+
+Priority guidance:
+- urgent: time-sensitive or blocking -- outages, legal or security issues, a deadline today, an angry customer threatening to leave.
+- high: someone is waiting on a reply soon -- a customer or stakeholder needs a decision, a warm sales lead.
+- medium: routine requests or questions with no time pressure.
+- low: FYI updates, newsletters, cold outreach, spam.
+
+Today's date is {{today}}.`;
+
+export async function triageBusinessMessage(
+  client: Pick<GoogleGenAI, 'models'>,
+  rawText: string
+): Promise<TriageResult> {
+  // Redact before truncating so a cut can't leave a partial email/number behind.
+  // Done here (not in the route) so no caller can send unredacted text.
+  const contents = redactSensitive(rawText).slice(0, MAX_TRIAGE_CHARS);
+  const systemInstruction = TRIAGE_SYSTEM_PROMPT.replace('{{today}}', new Date().toISOString().slice(0, 10));
+  const response = await client.models.generateContent({
+    model: 'gemini-flash-lite-latest',
+    contents,
+    config: { systemInstruction, responseMimeType: 'application/json' },
+  });
+
+  if (!response.text) throw new Error('Gemini response had no text content');
+
+  const parsed = JSON.parse(response.text);
+  if (!BUSINESS_MESSAGE_CATEGORIES.includes(parsed.category)) {
+    throw new Error(`Gemini returned an unrecognized category: ${parsed.category}`);
+  }
+  if (!PRIORITIES.includes(parsed.priority)) {
+    throw new Error(`Gemini returned an unrecognized priority: ${parsed.priority}`);
+  }
+
+  return {
+    category: parsed.category,
+    priority: parsed.priority,
+    priority_reason: typeof parsed.priority_reason === 'string' ? parsed.priority_reason : '',
+    summary: typeof parsed.summary === 'string' ? parsed.summary : '',
+    sender: typeof parsed.sender === 'string' && parsed.sender.trim() !== '' ? parsed.sender : null,
+  };
+}
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `npm run test --workspace=server`
+Expected: PASS (existing `gemini.test.ts` unaffected).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add server/src/gemini.ts server/test/triage.gemini.test.ts
+git commit -m "feat(server): add triageBusinessMessage with redaction and truncation"
+```
+
+---
+
+### Task 19: Business messages API router
+
+**Files:**
+- Create: `server/src/routes/businessMessages.ts`
+- Modify: `server/src/app.ts`
+- Create: `server/test/businessMessages.route.test.ts`
+
+**Interfaces:**
+- Consumes: Task 16's db functions, `BUSINESS_MESSAGE_STATUSES`,
+  `PRIORITIES`; Task 18's `triageBusinessMessage`; `logPerf`
+  (`server/src/perfLog.ts`).
+- Produces: `POST/GET /api/business-messages`,
+  `PATCH/DELETE /api/business-messages/:id` — used by Task 20.
+
+- [ ] **Step 1: Write failing tests**
+
+Create `server/test/businessMessages.route.test.ts`:
+```ts
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import request from 'supertest';
+import { openDb, createBusinessMessage, type NewBusinessMessage } from '../src/db.js';
+import { buildApp } from '../src/app.js';
+
+function mockGemini(responseText: string) {
+  return { models: { generateContent: vi.fn().mockResolvedValue({ text: responseText }) } };
+}
+
+const triaged = {
+  category: 'request', priority: 'high', priority_reason: 'Client waiting on a quote',
+  summary: 'Client asks for a quote by Friday', sender: 'Jane at Globex',
+} as const;
+
+const seed: NewBusinessMessage = { raw_text: 'hello', ...triaged };
+const URL = '/api/business-messages';
+
+describe('business messages API', () => {
+  let db: ReturnType<typeof openDb>;
+
+  beforeEach(() => {
+    db = openDb(':memory:');
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+
+  it('POST triages and saves a message, storing the unredacted original', async () => {
+    const gemini = mockGemini(JSON.stringify(triaged));
+    const app = buildApp(db, gemini as never);
+    const raw = 'Can you send a quote by Friday? jane@globex.com - Jane';
+
+    const res = await request(app).post(URL).send({ raw_text: raw });
+
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({ ...triaged, status: 'open', priority_overridden: 0, raw_text: raw });
+    expect(gemini.models.generateContent.mock.calls[0][0].contents).not.toContain('jane@globex.com');
+  });
+
+  it('POST saves spam as done', async () => {
+    const app = buildApp(db, mockGemini(JSON.stringify({ ...triaged, category: 'spam', priority: 'low' })) as never);
+    const res = await request(app).post(URL).send({ raw_text: 'WIN A FREE CRUISE' });
+    expect(res.body.status).toBe('done');
+  });
+
+  it('POST accepts text longer than the triage limit and stores all of it', async () => {
+    const app = buildApp(db, mockGemini(JSON.stringify(triaged)) as never);
+    const raw = 'x'.repeat(3000);
+    const res = await request(app).post(URL).send({ raw_text: raw });
+    expect(res.status).toBe(201);
+    expect(res.body.raw_text).toHaveLength(3000);
+  });
+
+  it('POST logs a triage perf line', async () => {
+    const app = buildApp(db, mockGemini(JSON.stringify(triaged)) as never);
+    await request(app).post(URL).send({ raw_text: 'x' });
+
+    const lines = (console.log as unknown as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]);
+    const perf = lines
+      .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+      .find((l) => l?.event === 'triage');
+    expect(perf).toMatchObject({ classify_ms: expect.any(Number), db_ms: expect.any(Number), total_ms: expect.any(Number) });
+  });
+
+  it('POST rejects empty raw_text with 400', async () => {
+    const app = buildApp(db, mockGemini('{}') as never);
+    expect((await request(app).post(URL).send({ raw_text: '  ' })).status).toBe(400);
+  });
+
+  it('POST returns 502 when triage fails', async () => {
+    const app = buildApp(db, mockGemini(JSON.stringify({ category: 'nope', priority: 'low' })) as never);
+    const res = await request(app).post(URL).send({ raw_text: 'x' });
+    expect(res.status).toBe(502);
+    expect(res.body.error).toBe('triage failed');
+  });
+
+  it('GET returns messages in triage order', async () => {
+    const low = createBusinessMessage(db, { ...seed, priority: 'low' });
+    const urgent = createBusinessMessage(db, { ...seed, priority: 'urgent' });
+    const app = buildApp(db, mockGemini('{}') as never);
+
+    const res = await request(app).get(URL);
+    expect(res.body.map((m: { id: number }) => m.id)).toEqual([urgent.id, low.id]);
+  });
+
+  it('PATCH sets status without flagging an override', async () => {
+    const m = createBusinessMessage(db, seed);
+    const app = buildApp(db, mockGemini('{}') as never);
+
+    const res = await request(app).patch(`${URL}/${m.id}`).send({ status: 'done' });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ status: 'done', priority_overridden: 0 });
+  });
+
+  it('PATCH overrides priority and flags it', async () => {
+    const m = createBusinessMessage(db, seed);
+    const app = buildApp(db, mockGemini('{}') as never);
+
+    const res = await request(app).patch(`${URL}/${m.id}`).send({ priority: 'urgent' });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ priority: 'urgent', priority_overridden: 1 });
+  });
+
+  it('PATCH rejects empty bodies, category, unknown keys, invalid values, bad ids, and missing rows', async () => {
+    const m = createBusinessMessage(db, seed);
+    const app = buildApp(db, mockGemini('{}') as never);
+    const patch = (id: string | number, body: object) => request(app).patch(`${URL}/${id}`).send(body);
+
+    expect((await patch(m.id, {})).status).toBe(400);
+    expect((await patch(m.id, { category: 'fyi' })).status).toBe(400);
+    expect((await patch(m.id, { status: 'done', summary: 'x' })).status).toBe(400);
+    expect((await patch(m.id, { status: 'archived' })).status).toBe(400);
+    expect((await patch(m.id, { priority: 'p1' })).status).toBe(400);
+    expect((await patch('abc', { status: 'done' })).status).toBe(400);
+    expect((await patch(9999, { status: 'done' })).status).toBe(404);
+  });
+
+  it('DELETE deletes, 404s when missing, 400s on a bad id', async () => {
+    const m = createBusinessMessage(db, seed);
+    const app = buildApp(db, mockGemini('{}') as never);
+
+    expect((await request(app).delete(`${URL}/${m.id}`)).status).toBe(204);
+    expect((await request(app).delete(`${URL}/${m.id}`)).status).toBe(404);
+    expect((await request(app).delete(`${URL}/abc`)).status).toBe(400);
+  });
+});
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `npm run test --workspace=server -- test/businessMessages.route.test.ts`
+Expected: FAIL — `/api/business-messages` routes return 404.
+
+- [ ] **Step 3: Create `server/src/routes/businessMessages.ts`**
+
+```ts
+import { Router } from 'express';
+import type Database from 'better-sqlite3';
+import type { GoogleGenAI } from '@google/genai';
+import { triageBusinessMessage } from '../gemini.js';
+import {
+  createBusinessMessage, listBusinessMessages, updateBusinessMessage, deleteBusinessMessage,
+  BUSINESS_MESSAGE_STATUSES, PRIORITIES,
+} from '../db.js';
+import { logPerf } from '../perfLog.js';
+
+const PATCHABLE_KEYS = ['status', 'priority'];
+
+function parseId(raw: string): number | undefined {
+  const id = Number(raw);
+  return Number.isInteger(id) ? id : undefined;
+}
+
+export function businessMessagesRouter(db: Database.Database, gemini: Pick<GoogleGenAI, 'models'>): Router {
+  const router = Router();
+
+  router.post('/', async (req, res) => {
+    const rawText = req.body?.raw_text;
+    if (typeof rawText !== 'string' || rawText.trim() === '') {
+      return res.status(400).json({ error: 'raw_text is required' });
+    }
+    const start = performance.now();
+    let classifyMs: number | undefined;
+    try {
+      const classifyStart = performance.now();
+      // triageBusinessMessage redacts and truncates; raw_text is stored unredacted.
+      const triaged = await triageBusinessMessage(gemini, rawText);
+      classifyMs = performance.now() - classifyStart;
+
+      const dbStart = performance.now();
+      const message = createBusinessMessage(db, { raw_text: rawText, ...triaged });
+      const dbMs = performance.now() - dbStart;
+
+      logPerf('triage', {
+        raw_text_len: rawText.length,
+        classify_ms: Math.round(classifyMs),
+        db_ms: Math.round(dbMs),
+        total_ms: Math.round(performance.now() - start),
+      });
+      res.status(201).json(message);
+    } catch (err) {
+      logPerf('triage_failed', {
+        raw_text_len: rawText.length,
+        classify_ms: Math.round(classifyMs ?? performance.now() - start),
+        total_ms: Math.round(performance.now() - start),
+      });
+      res.status(502).json({ error: 'triage failed', detail: (err as Error).message });
+    }
+  });
+
+  router.get('/', (_req, res) => {
+    res.json(listBusinessMessages(db));
+  });
+
+  router.patch('/:id', (req, res) => {
+    const id = parseId(req.params.id);
+    if (id === undefined) return res.status(400).json({ error: 'invalid id' });
+
+    const body = req.body ?? {};
+    const keys = Object.keys(body);
+    if (keys.length === 0 || keys.some((k) => !PATCHABLE_KEYS.includes(k))) {
+      return res.status(400).json({ error: 'body may only contain status and/or priority' });
+    }
+    if (body.status !== undefined && !BUSINESS_MESSAGE_STATUSES.includes(body.status)) {
+      return res.status(400).json({ error: `status must be one of ${BUSINESS_MESSAGE_STATUSES.join(', ')}` });
+    }
+    if (body.priority !== undefined && !PRIORITIES.includes(body.priority)) {
+      return res.status(400).json({ error: `priority must be one of ${PRIORITIES.join(', ')}` });
+    }
+
+    const updated = updateBusinessMessage(db, id, { status: body.status, priority: body.priority });
+    if (!updated) return res.status(404).json({ error: 'not found' });
+    res.json(updated);
+  });
+
+  router.delete('/:id', (req, res) => {
+    const id = parseId(req.params.id);
+    if (id === undefined) return res.status(400).json({ error: 'invalid id' });
+
+    if (!deleteBusinessMessage(db, id)) return res.status(404).json({ error: 'not found' });
+    res.status(204).send();
+  });
+
+  return router;
+}
+```
+
+- [ ] **Step 4: Mount it in `server/src/app.ts`**
+
+Add `import { businessMessagesRouter } from './routes/businessMessages.js';`
+and, after the search router line:
+```ts
+  app.use('/api/business-messages', businessMessagesRouter(db, gemini));
+```
+
+- [ ] **Step 5: Run the tests to verify they pass**
+
+Run: `npm run test --workspace=server`
+Expected: PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add server/src/routes/businessMessages.ts server/src/app.ts server/test/businessMessages.route.test.ts
+git commit -m "feat(server): add /api/business-messages triage routes"
+```
+
+---
+
+### Task 20: Business tab (client)
+
+**Files:**
+- Modify: `client/src/api.ts`
+- Create: `client/src/BusinessTab.tsx`
+- Create: `client/test/BusinessTab.test.tsx`
+- Modify: `client/src/App.tsx`
+- Modify: `client/test/App.test.tsx`
+- Modify: `client/src/styles.css`
+
+**Interfaces:**
+- Consumes: Task 19's `/api/business-messages` routes.
+- Produces: `BusinessMessage` type, `PRIORITIES`,
+  `sortBusinessMessages`, `triageBusinessMessage`/
+  `listBusinessMessages`/`updateBusinessMessage`/
+  `deleteBusinessMessage` (in `api.ts`);
+  `<BusinessTab onOpenCountChange? />`; Personal/Business tabs with
+  the open count in `App`.
+
+- [ ] **Step 1: Write failing tests**
+
+Create `client/test/BusinessTab.test.tsx`:
+```tsx
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
+import BusinessTab from '../src/BusinessTab.js';
+import type { BusinessMessage } from '../src/api.js';
+
+const msg = (over: Partial<BusinessMessage>): BusinessMessage => ({
+  id: 1, raw_text: 'raw', category: 'request', priority: 'medium', priority_overridden: 0,
+  priority_reason: 'routine', summary: 'a summary', sender: null, status: 'open',
+  created_at: '2026-09-14T10:00:00.000Z', updated_at: '2026-09-14T10:00:00.000Z',
+  ...over,
+});
+
+type Handler = (init?: RequestInit) => { ok?: boolean; body: unknown };
+
+function mockFetch(routes: Record<string, Handler>) {
+  globalThis.fetch = vi.fn(async (url: string, init?: RequestInit) => {
+    const key = `${init?.method ?? 'GET'} ${url}`;
+    const handler = routes[key];
+    if (!handler) return { ok: false, status: 500, json: async () => ({ error: `unmocked ${key}` }) };
+    const { ok = true, body } = handler(init);
+    return { ok, status: ok ? 200 : 500, json: async () => body };
+  }) as never;
+}
+
+const URL = '/api/business-messages';
+
+describe('BusinessTab', () => {
+  beforeEach(() => {
+    mockFetch({ [`GET ${URL}`]: () => ({ body: [] }) });
+  });
+
+  it('lists open messages with priority, category, and summary', async () => {
+    mockFetch({
+      [`GET ${URL}`]: () => ({ body: [msg({ id: 1, priority: 'urgent', category: 'complaint', summary: 'Site is down' })] }),
+    });
+    render(<BusinessTab />);
+
+    const item = (await screen.findByText('Site is down')).closest('li')!;
+    expect(within(item).getByRole('combobox', { name: 'Priority' })).toHaveValue('urgent');
+    expect(within(item).getByText('Complaint')).toBeInTheDocument();
+    expect(within(item).queryByText(/edited/i)).not.toBeInTheDocument();
+  });
+
+  it('triages a pasted message and inserts it in priority order', async () => {
+    mockFetch({
+      [`GET ${URL}`]: () => ({ body: [msg({ id: 1, priority: 'low', summary: 'Newsletter' })] }),
+      [`POST ${URL}`]: () => ({ body: msg({ id: 2, priority: 'urgent', summary: 'Outage report' }) }),
+    });
+    render(<BusinessTab />);
+    await screen.findByText('Newsletter');
+
+    fireEvent.change(screen.getByPlaceholderText(/paste a business message/i), { target: { value: 'we are down' } });
+    fireEvent.click(screen.getByRole('button', { name: /triage/i }));
+
+    await screen.findByText('Outage report');
+    expect(screen.getAllByTestId('message-summary').map((el) => el.textContent)).toEqual(['Outage report', 'Newsletter']);
+  });
+
+  it('shows an inline error when triage fails', async () => {
+    render(<BusinessTab />);
+    fireEvent.change(screen.getByPlaceholderText(/paste a business message/i), { target: { value: 'x' } });
+    fireEvent.click(screen.getByRole('button', { name: /triage/i }));
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+  });
+
+  it('overriding priority PATCHes, re-sorts, and shows the edited marker', async () => {
+    mockFetch({
+      [`GET ${URL}`]: () => ({ body: [msg({ id: 1, priority: 'high', summary: 'First' }), msg({ id: 2, priority: 'low', summary: 'Second' })] }),
+      [`PATCH ${URL}/2`]: () => ({ body: msg({ id: 2, priority: 'urgent', priority_overridden: 1, summary: 'Second' }) }),
+    });
+    render(<BusinessTab />);
+    const row = (await screen.findByText('Second')).closest('li')!;
+
+    fireEvent.change(within(row).getByRole('combobox', { name: 'Priority' }), { target: { value: 'urgent' } });
+
+    await waitFor(() =>
+      expect(screen.getAllByTestId('message-summary').map((el) => el.textContent)).toEqual(['Second', 'First'])
+    );
+    expect(within(screen.getByText('Second').closest('li')!).getByText(/edited/i)).toBeInTheDocument();
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      `${URL}/2`,
+      expect.objectContaining({ method: 'PATCH', body: JSON.stringify({ priority: 'urgent' }) })
+    );
+  });
+
+  it('marking a message done moves it to the Done section and reports the open count', async () => {
+    const onOpenCountChange = vi.fn();
+    mockFetch({
+      [`GET ${URL}`]: () => ({ body: [msg({ id: 1, summary: 'Quote request' })] }),
+      [`PATCH ${URL}/1`]: () => ({ body: msg({ id: 1, summary: 'Quote request', status: 'done' }) }),
+    });
+    render(<BusinessTab onOpenCountChange={onOpenCountChange} />);
+    await screen.findByText('Quote request');
+    await waitFor(() => expect(onOpenCountChange).toHaveBeenLastCalledWith(1));
+    expect(onOpenCountChange).not.toHaveBeenCalledWith(0);
+
+    fireEvent.click(screen.getByRole('checkbox', { name: /done/i }));
+
+    await waitFor(() => expect(screen.getByText(/done \(1\)/i)).toBeInTheDocument());
+    expect(onOpenCountChange).toHaveBeenLastCalledWith(0);
+  });
+
+  it('a failed row action leaves the row unchanged and shows an inline error', async () => {
+    mockFetch({
+      [`GET ${URL}`]: () => ({ body: [msg({ id: 1, summary: 'Quote request' })] }),
+      [`PATCH ${URL}/1`]: () => ({ ok: false, body: { error: 'server down' } }),
+    });
+    render(<BusinessTab />);
+    const row = (await screen.findByText('Quote request')).closest('li')!;
+
+    fireEvent.click(within(row).getByRole('checkbox', { name: /done/i }));
+
+    expect(await within(row).findByRole('alert')).toHaveTextContent(/server down/i);
+    expect(within(row).getByRole('checkbox', { name: /done/i })).not.toBeChecked();
+    expect(screen.queryByText(/done \(1\)/i)).not.toBeInTheDocument();
+  });
+
+  it('deletes a message', async () => {
+    mockFetch({
+      [`GET ${URL}`]: () => ({ body: [msg({ id: 1, summary: 'Old thread' })] }),
+      [`DELETE ${URL}/1`]: () => ({ body: null }),
+    });
+    render(<BusinessTab />);
+    await screen.findByText('Old thread');
+
+    fireEvent.click(screen.getByRole('button', { name: /delete/i }));
+    await waitFor(() => expect(screen.queryByText('Old thread')).not.toBeInTheDocument());
+  });
+});
+```
+
+Replace `client/test/App.test.tsx` with:
+```tsx
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen, fireEvent } from '@testing-library/react';
+import App from '../src/App.js';
+
+function mockFetch(businessMessages: unknown[] = []) {
+  globalThis.fetch = vi.fn(async (url: string) => ({
+    ok: true,
+    json: async () => (url === '/api/business-messages' ? businessMessages : []),
+  })) as never;
+}
+
+describe('App', () => {
+  beforeEach(() => mockFetch());
+
+  it('renders the Genie heading', () => {
+    render(<App />);
+    expect(screen.getByRole('heading', { name: 'Genie' })).toBeInTheDocument();
+  });
+
+  it('switches between the Personal and Business tabs', async () => {
+    render(<App />);
+    expect(screen.getByRole('tab', { name: 'Personal' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByPlaceholderText(/type or say something/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('tab', { name: /^Business/ }));
+
+    expect(screen.getByRole('tab', { name: /^Business/ })).toHaveAttribute('aria-selected', 'true');
+    expect(await screen.findByPlaceholderText(/paste a business message/i)).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText(/type or say something/i)).not.toBeInTheDocument();
+  });
+
+  it('shows the open business message count on the Business tab while on Personal', async () => {
+    mockFetch([{ status: 'open' }, { status: 'open' }, { status: 'done' }]);
+    render(<App />);
+    expect(await screen.findByRole('tab', { name: 'Business (2)' })).toBeInTheDocument();
+  });
+});
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `npm run test --workspace=client`
+Expected: FAIL — `BusinessTab` doesn't exist; App has no tabs.
+
+- [ ] **Step 3: Add business message types and calls to `client/src/api.ts`**
+
+Append:
+```ts
+export interface BusinessMessage {
+  id: number;
+  raw_text: string;
+  category: 'request' | 'question' | 'complaint' | 'sales_lead' | 'fyi' | 'spam';
+  priority: 'urgent' | 'high' | 'medium' | 'low';
+  priority_overridden: 0 | 1;
+  priority_reason: string;
+  summary: string;
+  sender: string | null;
+  status: 'open' | 'done';
+  created_at: string;
+  updated_at: string;
+}
+
+// Order is the sort rank: urgent first. Must match the server's listBusinessMessages ORDER BY.
+export const PRIORITIES: BusinessMessage['priority'][] = ['urgent', 'high', 'medium', 'low'];
+
+export function sortBusinessMessages(messages: BusinessMessage[]): BusinessMessage[] {
+  return [...messages].sort((a, b) =>
+    (a.status === b.status ? 0 : a.status === 'open' ? -1 : 1) ||
+    PRIORITIES.indexOf(a.priority) - PRIORITIES.indexOf(b.priority) ||
+    b.created_at.localeCompare(a.created_at) ||
+    b.id - a.id
+  );
+}
+
+const BUSINESS_MESSAGES_URL = '/api/business-messages';
+
+async function errorFrom(res: Response, fallback: string): Promise<Error> {
+  const body = await res.json().catch(() => null);
+  return new Error(body?.error ?? `${fallback}: ${res.status}`);
+}
+
+export async function triageBusinessMessage(rawText: string): Promise<BusinessMessage> {
+  const res = await fetch(BUSINESS_MESSAGES_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ raw_text: rawText }),
+  });
+  if (!res.ok) throw await errorFrom(res, 'failed to triage message');
+  return res.json();
+}
+
+export async function listBusinessMessages(): Promise<BusinessMessage[]> {
+  const res = await fetch(BUSINESS_MESSAGES_URL);
+  if (!res.ok) throw new Error(`failed to list business messages: ${res.status}`);
+  return res.json();
+}
+
+export async function updateBusinessMessage(
+  id: number,
+  fields: Partial<Pick<BusinessMessage, 'status' | 'priority'>>
+): Promise<BusinessMessage> {
+  const res = await fetch(`${BUSINESS_MESSAGES_URL}/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(fields),
+  });
+  if (!res.ok) throw await errorFrom(res, 'failed to update message');
+  return res.json();
+}
+
+export async function deleteBusinessMessage(id: number): Promise<void> {
+  const res = await fetch(`${BUSINESS_MESSAGES_URL}/${id}`, { method: 'DELETE' });
+  if (!res.ok) throw await errorFrom(res, 'failed to delete message');
+}
+```
+
+- [ ] **Step 4: Create `client/src/BusinessTab.tsx`**
+
+```tsx
+import { useEffect, useState } from 'react';
+import {
+  triageBusinessMessage, listBusinessMessages, updateBusinessMessage, deleteBusinessMessage,
+  sortBusinessMessages, PRIORITIES, type BusinessMessage,
+} from './api.js';
+
+const CATEGORY_LABELS: Record<BusinessMessage['category'], string> = {
+  request: 'Request', question: 'Question', complaint: 'Complaint',
+  sales_lead: 'Sales lead', fyi: 'FYI', spam: 'Spam',
+};
+
+function MessageRow({ message, error, onUpdate, onDelete }: {
+  message: BusinessMessage;
+  error: string | undefined;
+  onUpdate: (m: BusinessMessage, fields: Partial<Pick<BusinessMessage, 'status' | 'priority'>>) => void;
+  onDelete: (id: number) => void;
+}) {
+  return (
+    <li className={`message-row ${message.status === 'done' ? 'message-done' : ''}`}>
+      <input
+        type="checkbox"
+        className="message-check"
+        aria-label={`Done: ${message.summary}`}
+        checked={message.status === 'done'}
+        onChange={() => onUpdate(message, { status: message.status === 'open' ? 'done' : 'open' })}
+      />
+      <div className="message-main">
+        <div className="message-meta">
+          <select
+            aria-label="Priority"
+            className={`priority-badge priority-${message.priority}`}
+            value={message.priority}
+            onChange={(e) => onUpdate(message, { priority: e.target.value as BusinessMessage['priority'] })}
+          >
+            {PRIORITIES.map((p) => <option key={p} value={p}>{p}</option>)}
+          </select>
+          {message.priority_overridden === 1 && (
+            <span className="edited-marker" title="Priority set by you">edited</span>
+          )}
+          <span className="category-chip">{CATEGORY_LABELS[message.category]}</span>
+          {message.sender && <span className="message-sender">{message.sender}</span>}
+        </div>
+        <p className="message-summary" data-testid="message-summary">{message.summary || message.raw_text}</p>
+        {message.priority_reason && <p className="message-reason">AI reasoning: {message.priority_reason}</p>}
+        <details className="message-raw">
+          <summary>Original message</summary>
+          <pre>{message.raw_text}</pre>
+        </details>
+        {error && <span className="row-error" role="alert">{error}</span>}
+      </div>
+      <button type="button" className="btn-text btn-danger" onClick={() => onDelete(message.id)}>Delete</button>
+    </li>
+  );
+}
+
+export default function BusinessTab({ onOpenCountChange }: { onOpenCountChange?: (n: number) => void }) {
+  const [messages, setMessages] = useState<BusinessMessage[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [text, setText] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [rowErrors, setRowErrors] = useState<Record<number, string>>({});
+
+  useEffect(() => {
+    listBusinessMessages().then(setMessages).catch(() => {}).finally(() => setLoaded(true));
+  }, []);
+
+  const open = messages.filter((m) => m.status === 'open');
+  const done = messages.filter((m) => m.status === 'done');
+
+  // Only report after the initial load, so the tab count never flashes to 0.
+  useEffect(() => {
+    if (loaded) onOpenCountChange?.(open.length);
+  }, [loaded, open.length, onOpenCountChange]);
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!text.trim() || submitting) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      const message = await triageBusinessMessage(text);
+      setMessages((prev) => sortBusinessMessages([message, ...prev]));
+      setText('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to triage message');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  // Not optimistic: the row only changes after the server confirms (spec.md "Row errors").
+  async function runRowAction(id: number, action: () => Promise<void>) {
+    try {
+      await action();
+      setRowErrors(({ [id]: _cleared, ...rest }) => rest);
+    } catch (err) {
+      setRowErrors((prev) => ({ ...prev, [id]: err instanceof Error ? err.message : 'Action failed' }));
+    }
+  }
+
+  function handleUpdate(message: BusinessMessage, fields: Partial<Pick<BusinessMessage, 'status' | 'priority'>>) {
+    return runRowAction(message.id, async () => {
+      const updated = await updateBusinessMessage(message.id, fields);
+      setMessages((prev) => sortBusinessMessages(prev.map((m) => (m.id === updated.id ? updated : m))));
+    });
+  }
+
+  function handleDelete(id: number) {
+    return runRowAction(id, async () => {
+      await deleteBusinessMessage(id);
+      setMessages((prev) => prev.filter((m) => m.id !== id));
+    });
+  }
+
+  const row = (m: BusinessMessage) => (
+    <MessageRow key={m.id} message={m} error={rowErrors[m.id]} onUpdate={handleUpdate} onDelete={handleDelete} />
+  );
+
+  return (
+    <>
+      <form className="triage-form" onSubmit={handleSubmit}>
+        <textarea
+          className="triage-input"
+          placeholder="Paste a business message (email, chat, customer note)..."
+          rows={5}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+        />
+        <div className="triage-actions">
+          {error && <span className="capture-error" role="alert">{error}</span>}
+          <button type="submit" className="add-button" disabled={submitting}>
+            {submitting ? 'Triaging…' : 'Triage'}
+          </button>
+        </div>
+      </form>
+
+      <section className="section">
+        <h2 className="section-title">
+          Open
+          {open.length > 0 && <span className="section-count">{open.length}</span>}
+        </h2>
+        {open.length === 0 ? (
+          <p className="empty-note">Nothing waiting on you.</p>
+        ) : (
+          <ul className="message-list">{open.map(row)}</ul>
+        )}
+      </section>
+
+      {done.length > 0 && (
+        <details className="section done-section">
+          <summary className="section-title">Done ({done.length})</summary>
+          <ul className="message-list">{done.map(row)}</ul>
+        </details>
+      )}
+    </>
+  );
+}
+```
+
+- [ ] **Step 5: Add tabs and the open count to `client/src/App.tsx`**
+
+Import `BusinessTab` and `listBusinessMessages`, then add:
+```tsx
+  const [tab, setTab] = useState<'personal' | 'business'>('personal');
+  const [openBusinessCount, setOpenBusinessCount] = useState(0);
+
+  useEffect(() => {
+    listBusinessMessages()
+      .then((ms) => setOpenBusinessCount(ms.filter((m) => m.status === 'open').length))
+      .catch(() => {});
+  }, []);
+```
+Render a tab bar right after `</header>`:
+```tsx
+      <nav className="tab-bar" role="tablist">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === 'personal'}
+          className={`tab ${tab === 'personal' ? 'tab-active' : ''}`}
+          onClick={() => setTab('personal')}
+        >
+          Personal
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === 'business'}
+          className={`tab ${tab === 'business' ? 'tab-active' : ''}`}
+          onClick={() => setTab('business')}
+        >
+          {openBusinessCount > 0 ? `Business (${openBusinessCount})` : 'Business'}
+        </button>
+      </nav>
+```
+Wrap the existing `CaptureBox`, `DuePanel`, Tasks section, and Search
+section, unchanged, in `{tab === 'personal' && (<>…</>)}`, followed
+by `{tab === 'business' && <BusinessTab onOpenCountChange={setOpenBusinessCount} />}`.
+The `entries` state and its initial `listEntries()` effect stay in
+`App`, so switching tabs doesn't lose or re-fetch personal entries.
+(`setOpenBusinessCount` is a stable state setter, so it's safe in
+`BusinessTab`'s effect dependency list.)
+
+- [ ] **Step 6: Add styles to `client/src/styles.css`**
+
+Append (reusing existing tokens only):
+```css
+/* ---- tabs ---- */
+
+.tab-bar {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.tab {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 10px 14px;
+  color: var(--text-muted);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.tab:hover { color: var(--text); }
+.tab-active { color: var(--text); border-bottom-color: var(--accent); }
+
+/* ---- business triage ---- */
+
+.triage-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  padding: 12px;
+}
+
+.triage-form:focus-within {
+  border-color: var(--accent-ring);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.triage-input {
+  background: transparent;
+  border: none;
+  resize: vertical;
+  color: var(--text);
+  font: inherit;
+  font-size: 15px;
+}
+
+.triage-input:focus { outline: none; }
+
+.triage-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 12px;
+}
+
+.message-list { list-style: none; margin: 0; padding: 0; }
+
+.message-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.message-main { flex: 1; min-width: 0; }
+.message-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.message-summary { margin: 6px 0 2px; color: var(--text); }
+.message-reason { margin: 0; color: var(--text-muted); font-size: 13px; }
+.message-sender { color: var(--text-faint); font-size: 12px; }
+.message-done .message-summary { color: var(--text-faint); text-decoration: line-through; }
+.message-raw summary { color: var(--text-faint); font-size: 12px; cursor: pointer; margin-top: 6px; }
+.message-raw pre { white-space: pre-wrap; color: var(--text-muted); font: inherit; font-size: 13px; }
+
+.priority-badge,
+.category-chip {
+  border: none;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+select.priority-badge { appearance: none; cursor: pointer; }
+.priority-urgent { background: var(--danger); color: #fff; }
+.priority-high { background: var(--danger-soft); color: var(--danger); }
+.priority-medium { background: var(--accent-soft); color: var(--accent); }
+.priority-low { background: var(--surface-raised); color: var(--text-muted); }
+.category-chip { background: var(--surface-raised); color: var(--text-muted); }
+.edited-marker { color: var(--text-faint); font-size: 11px; font-style: italic; }
+.row-error { display: block; margin-top: 6px; color: var(--danger); font-size: 12px; }
+
+.done-section summary { cursor: pointer; }
+```
+
+(`.btn-text`/`.btn-danger` (Tasks list delete button), `.empty-note`, and
+`.capture-error` already exist and are reused.)
+
+- [ ] **Step 7: Run the tests to verify they pass**
+
+Run: `npm test`
+Expected: PASS in both workspaces.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add client/src/api.ts client/src/BusinessTab.tsx client/src/App.tsx client/src/styles.css \
+  client/test/BusinessTab.test.tsx client/test/App.test.tsx
+git commit -m "feat(client): add Business triage tab"
+```
+
+- [ ] **Step 9: Update CLAUDE.md**
+
+Add an architecture note covering:
+- Business triage is the deliberate exception to "one `entries` table": it has its own `business_messages` table, its router is `server/src/routes/businessMessages.ts`, `triageBusinessMessage()` lives in `gemini.ts`, and `POST /api/business-messages` logs a `triage` perf line.
+- Text sent to Gemini for triage is always `redactSensitive(raw).slice(0, 1000)` (`server/src/redact.ts`), while `raw_text` is stored unredacted.
+- Spam is saved as done.
+- The Personal/Business tab and its open count are client state in `App.tsx`.
+
+Commit as `docs: note business triage architecture in CLAUDE.md`.
+
+---
+
+## End-to-end manual verification (v1.2, after Task 20)
+
+1. `npm run dev`, open `http://localhost:5173`. Confirm the
+   **Personal** tab is selected and looks exactly as before.
+2. Switch to **Business**. Paste each of these and click **Triage**:
+   - "Our checkout has been failing for every customer since 9am.
+     Fix this now or we're moving to a competitor. — Dana, Acme,
+     dana@acme.com, +1 (555) 123-4567"
+     → expect `complaint`, `urgent`, sender Acme/Dana.
+   - "Hi, could you send over a quote for 50 seats by Friday? Thanks,
+     Raj at Globex" → expect `request` or `sales_lead`, `high`.
+   - "This week in SaaS: 10 growth tips…" → expect `fyi`, `low`.
+   - "CONGRATULATIONS you have won a free cruise, click here" →
+     expect `spam`; it goes straight into **Done (1)**, not Open.
+3. Confirm Open is ordered urgent → high → low, and each row shows a
+   summary, the AI reasoning, and an expandable original. Expand
+   Dana's original: the email address and phone number are shown
+   **unredacted**, because they're stored locally.
+4. Confirm the redaction happened on the way out:
+   `npm run test --workspace=server -- test/triage.gemini.test.ts`
+   passes. (No request body is logged, so the test is the evidence.)
+5. Change the newsletter's priority to **high** — it moves up and
+   shows **edited**. Reload the page; it's still high and edited.
+6. Check **Done** on the urgent message — it leaves Open and joins
+   the Done section; uncheck it there and it returns to the top.
+7. Switch to **Personal**: the tab reads `Business (n)` with the
+   correct open count. Go back, mark one done, and return to
+   Personal — the count dropped by one.
+8. Paste ~3,000 characters (e.g. a long email thread) — triage
+   succeeds, and the stored original shows the full text.
+9. Stop the server and try to mark a message done — the row stays
+   put and shows an inline error. Restart the server and retry — it
+   succeeds and the error clears.
+10. On **Personal**, none of the business messages appear in Tasks or
+    Due/Upcoming, and asking Ask Genie "what did Acme say" doesn't
+    surface them.
+11. Server logs show one `{"event":"triage",...}` JSON line per
+    successful triage.
