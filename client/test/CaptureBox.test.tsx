@@ -55,4 +55,43 @@ describe('CaptureBox', () => {
     render(<CaptureBox onCaptured={() => {}} />);
     expect(screen.queryByRole('button', { name: /speak/i })).not.toBeInTheDocument();
   });
+
+  it('shows the server error and preserves the input when the submit fails', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 502,
+      json: async () => ({ error: 'classification failed', detail: 'Gemini API key is invalid' }),
+    }) as never;
+    const onCaptured = vi.fn();
+    render(<CaptureBox onCaptured={onCaptured} />);
+
+    const input = screen.getByPlaceholderText(/type or say something/i) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'buy milk' } });
+    fireEvent.click(screen.getByRole('button', { name: /add/i }));
+
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('classification failed'));
+    expect(input.value).toBe('buy milk');
+    expect(onCaptured).not.toHaveBeenCalled();
+  });
+
+  it('clears a previous error once a submit succeeds', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 502,
+      json: async () => ({ error: 'classification failed' }),
+    }) as never;
+    render(<CaptureBox onCaptured={() => {}} />);
+
+    fireEvent.change(screen.getByPlaceholderText(/type or say something/i), { target: { value: 'buy milk' } });
+    fireEvent.click(screen.getByRole('button', { name: /add/i }));
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: 1, raw_text: 'buy milk', domain: 'personal', type: 'task' }),
+    }) as never;
+    fireEvent.click(screen.getByRole('button', { name: /add/i }));
+
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+  });
 });
