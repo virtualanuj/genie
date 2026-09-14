@@ -94,6 +94,19 @@ synthesis.
   routes (`GET`/`PATCH`/`DELETE`) aren't instrumented; they're already known
   sub-millisecond.
 
+- **Business message triage is the deliberate exception to "one `entries`
+  table" (v1.2).** Pasted business messages live in their own
+  `business_messages` table, served by `server/src/routes/businessMessages.ts`
+  at `/api/business-messages`, so they never appear in Tasks, Due, search, or
+  recurrence. `triageBusinessMessage()` (`server/src/gemini.ts`) always sends
+  `redactSensitive(raw).slice(0, MAX_TRIAGE_CHARS)` (`server/src/redact.ts`:
+  emails/phones/long numbers stripped, then truncated to 1000 chars) — never
+  raw text — while `raw_text` is stored unredacted locally. Spam is saved as
+  `done`; a user priority change sets `priority_overridden`; category is
+  never patchable. `POST /api/business-messages` logs a `triage` perf line.
+  The Personal/Business tab and its open-count badge are client state in
+  `client/src/App.tsx`.
+
 - **Some list behavior is client-only, with no API surface.** The Recent
   list's domain filter and due-date-ascending sort, and the Due/Upcoming
   split, are all computed client-side from the existing `/api/entries` and
