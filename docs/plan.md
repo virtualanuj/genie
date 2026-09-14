@@ -4580,7 +4580,59 @@ Commit as `docs: note business triage architecture in CLAUDE.md`.
 
 ---
 
-## End-to-end manual verification (v1.2, after Task 20)
+### Task 21: Business tab feedback — voice, done toggle, filters, card view
+
+Follow-up from trying Task 20 in the app. Client-only; server untouched.
+Already implemented, so the code is in the commits below rather than
+repeated here.
+
+**Files:**
+- Create: `client/src/speech.ts` (moved out of `CaptureBox.tsx`)
+- Modify: `client/src/CaptureBox.tsx`, `client/src/BusinessTab.tsx`,
+  `client/src/styles.css`, `client/test/BusinessTab.test.tsx`
+
+**Interfaces:**
+- Produces: `getSpeechRecognition()` / `SpeechRecognitionLike` from
+  `client/src/speech.ts`, used by both `CaptureBox` and `BusinessTab`.
+- `BusinessTab`'s props (`onOpenCountChange`) are unchanged; the count
+  it reports stays unfiltered.
+
+- [x] **Step 1: Refactor.** Move the speech recognition detection into
+  `speech.ts`; `CaptureBox` tests pass unchanged.
+  Commit: `refactor(client): extract speech recognition helper`
+- [x] **Step 2: Write failing tests** in `client/test/BusinessTab.test.tsx`:
+  - done/row-error tests click a **Mark done** button (not a checkbox);
+    after success the row shows **Reopen** with `aria-pressed="true"`;
+    on failure the button stays **Mark done** with `aria-pressed="false"`
+  - the mic appends the transcript to existing text (`'Hi team,'` +
+    `'the site is down'` → `'Hi team, the site is down'`); no mic
+    without Web Speech support
+  - the **Urgent** priority pill hides non-urgent rows in both
+    sections; adding the **Complaint** category pill narrows further;
+    **All** restores; nothing matching shows "No messages match these
+    filters."; `onOpenCountChange` still reports the unfiltered count
+  - list view by default; **Card view** switches both lists to
+    `ul.entry-cards` / `li.message-card`; Mark done works in card view;
+    **List view** switches back
+- [x] **Step 3: Implement** in `BusinessTab.tsx`:
+  - mic button in `.triage-actions`
+  - `MessageRow` actions wrapped in `.message-actions` (toggle + Delete)
+    and takes a `view` prop that picks the row or card classes
+  - a `FilterPills` component (`role="group"`, "Filter by priority" /
+    "Filter by category") and a `.view-toggle`, together in
+    `.list-controls.business-controls`, shown once messages exist
+  - `visible` = messages filtered by both filters, split into Open
+    and Done
+  - styles: `.filter-stack`, `.message-actions`, `.message-card`,
+    `.done-toggle.active`
+- [x] **Step 4: Verify.** `npm test` (server 92, client 41), client
+  `tsc --noEmit`, and `npm run build` all pass.
+- [x] **Step 5: Commit**
+  `feat(client): voice input, done toggle, filters, and card view on Business tab`
+
+---
+
+## End-to-end manual verification (v1.2, after Task 21)
 
 1. `npm run dev`, open `http://localhost:5173`. Confirm the
    **Personal** tab is selected and looks exactly as before.
@@ -4618,3 +4670,15 @@ Commit as `docs: note business triage architecture in CLAUDE.md`.
     surface them.
 11. Server logs show one `{"event":"triage",...}` JSON line per
     successful triage.
+12. Business tab mic (Chrome): type "Hi team," then dictate a
+    sentence — it's appended after the typed text. Dictate again —
+    appended again. The Personal tab's mic still replaces as before.
+13. Click **Mark done** on a row — it moves to Done, where the button
+    reads **Reopen** and is highlighted; **Reopen** brings it back.
+14. Click the **Urgent** priority pill, then the **Complaint**
+    category pill — both Open and Done narrow; pick a combination with
+    no matches to see "No messages match these filters."; **All** on
+    both restores. The tab badge still shows the unfiltered open count.
+15. Click ▦ — Open and Done render as cards like the Tasks card view,
+    with priority select, Mark done, and Delete working; ☰ returns to
+    rows.

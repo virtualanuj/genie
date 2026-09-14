@@ -75,6 +75,11 @@ things other people are waiting on.
 - **Spam files itself away.** Messages classified as spam are saved as
   already done, so they never clutter the open list, but you can
   reopen one if the genie was wrong.
+- **Speak or paste.** The business box has the same mic option as the
+  personal one; dictated text is added to whatever is already typed.
+- **Filter and view like Tasks.** You can narrow the list by priority
+  and by category, and switch between list and card layouts, the same
+  way the Personal Tasks list works.
 - **Visible from anywhere.** The Business tab label shows how many
   messages are still open, so you notice waiting messages while on
   the Personal tab.

@@ -241,6 +241,23 @@ kept (see intent.md non-goals).
     button is disabled; errors show inline (`role="alert"`) the same
     way `CaptureBox` does. No length counter, since long pastes are
     truncated server-side, not rejected.
+  - **Voice input.** A mic button appears when the browser supports
+    the Web Speech API (same detection as `CaptureBox`, shared via
+    `client/src/speech.ts`). Unlike the Personal box, each transcript
+    is **appended** to the textarea (space-separated) rather than
+    replacing it, so a longer message can be dictated in parts.
+  - **Filters and layout** (client-only, no API params — same approach
+    as the Personal Tasks list). Once any messages exist, the Open
+    section shows two single-select pill rows, **Priority** (All /
+    Urgent / High / Medium / Low) and **Category** (All / Request /
+    Question / Complaint / Sales lead / FYI / Spam), combined with AND
+    and applied to both Open and Done. Section counts reflect the
+    filtered results, but the tab badge always counts all open
+    messages. If messages exist but none match, Open reads "No messages
+    match these filters." Beside the filters, the same **list / card**
+    toggle as the Tasks list (☰ / ▦, default list, not persisted)
+    switches both sections between rows and the shared `entry-cards`
+    grid. Filter and layout choices reset when the tab remounts.
   - An **Open** list. Each row shows:
     - a colored priority badge, which is a `<select>` (aria-label
       "Priority") so it can be changed in place, plus a small
@@ -249,9 +266,11 @@ kept (see intent.md non-goals).
     - the priority reason, labeled as the AI's reasoning
     - the full raw text, expandable
 
-    Row actions: a **Done** checkbox and **Delete**.
+    Row actions: a **Mark done** / **Reopen** toggle button
+    (`aria-pressed`, accent-highlighted when done) and **Delete**.
   - A collapsed **Done (n)** section holding done messages (including
-    auto-filed spam), with the same row UI; unchecking reopens.
+    auto-filed spam), with the same row UI; **Reopen** moves a message
+    back to Open.
   - Order comes from the API's sort. A newly triaged message is
     inserted in its sorted position client-side, and changing status
     or priority re-sorts locally.

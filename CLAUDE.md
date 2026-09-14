@@ -112,6 +112,9 @@ synthesis.
   split, are all computed client-side from the existing `/api/entries` and
   `/api/entries/due` responses (`client/src/EntryList.tsx`,
   `client/src/DuePanel.tsx`) — there's no server-side filter/sort param.
+  The same holds for the Business tab's priority/category filters and its
+  list/card toggle (`client/src/BusinessTab.tsx`); its tab badge counts all
+  open messages, ignoring filters.
 
 # Development Workflow Rules
 
