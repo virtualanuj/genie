@@ -49,6 +49,45 @@ export interface NewEntry {
   series_id?: number | null;
 }
 
+export type BusinessMessageCategory = 'request' | 'question' | 'complaint' | 'sales_lead' | 'fyi' | 'spam';
+export type Priority = 'urgent' | 'high' | 'medium' | 'low';
+export type BusinessMessageStatus = 'open' | 'done';
+
+export const BUSINESS_MESSAGE_CATEGORIES: BusinessMessageCategory[] = [
+  'request', 'question', 'complaint', 'sales_lead', 'fyi', 'spam',
+];
+// Order is the sort rank: urgent first.
+export const PRIORITIES: Priority[] = ['urgent', 'high', 'medium', 'low'];
+export const BUSINESS_MESSAGE_STATUSES: BusinessMessageStatus[] = ['open', 'done'];
+
+export interface BusinessMessage {
+  id: number;
+  raw_text: string;
+  category: BusinessMessageCategory;
+  priority: Priority;
+  priority_overridden: 0 | 1;
+  priority_reason: string;
+  summary: string;
+  sender: string | null;
+  status: BusinessMessageStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface NewBusinessMessage {
+  raw_text: string;
+  category: BusinessMessageCategory;
+  priority: Priority;
+  priority_reason: string;
+  summary: string;
+  sender?: string | null;
+}
+
+export interface BusinessMessageUpdate {
+  status?: BusinessMessageStatus;
+  priority?: Priority;
+}
+
 export function openDb(path: string): Database.Database {
   const db = new Database(path);
   db.exec(`
@@ -75,6 +114,21 @@ export function openDb(path: string): Database.Database {
       // column already exists (pre-existing db from before v1.1)
     }
   }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS business_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      raw_text TEXT NOT NULL,
+      category TEXT NOT NULL,
+      priority TEXT NOT NULL,
+      priority_overridden INTEGER NOT NULL DEFAULT 0,
+      priority_reason TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      sender TEXT,
+      status TEXT NOT NULL DEFAULT 'open',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    )
+  `);
   return db;
 }
 
@@ -218,4 +272,63 @@ export function advanceRecurringEntries(db: Database.Database, nowISO: string): 
     created.push(spawned);
   }
   return created;
+}
+
+export function createBusinessMessage(db: Database.Database, m: NewBusinessMessage): BusinessMessage {
+  const now = new Date().toISOString();
+  const result = db.prepare(`
+    INSERT INTO business_messages (raw_text, category, priority, priority_reason, summary, sender, status, created_at, updated_at)
+    VALUES (@raw_text, @category, @priority, @priority_reason, @summary, @sender, @status, @now, @now)
+  `).run({
+    raw_text: m.raw_text,
+    category: m.category,
+    priority: m.priority,
+    priority_reason: m.priority_reason,
+    summary: m.summary,
+    sender: m.sender ?? null,
+    // Spam files itself away as done (intent.md v1.2); the user can reopen it.
+    status: m.category === 'spam' ? 'done' : 'open',
+    now,
+  });
+  return getBusinessMessage(db, Number(result.lastInsertRowid))!;
+}
+
+export function getBusinessMessage(db: Database.Database, id: number): BusinessMessage | undefined {
+  return db.prepare('SELECT * FROM business_messages WHERE id = ?').get(id) as BusinessMessage | undefined;
+}
+
+export function listBusinessMessages(db: Database.Database): BusinessMessage[] {
+  return db.prepare(`
+    SELECT * FROM business_messages
+    ORDER BY
+      CASE status WHEN 'open' THEN 0 ELSE 1 END,
+      CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
+      created_at DESC,
+      id DESC
+  `).all() as BusinessMessage[];
+}
+
+export function updateBusinessMessage(
+  db: Database.Database,
+  id: number,
+  fields: BusinessMessageUpdate
+): BusinessMessage | undefined {
+  const existing = getBusinessMessage(db, id);
+  if (!existing) return undefined;
+  db.prepare(`
+    UPDATE business_messages
+    SET status = @status, priority = @priority, priority_overridden = @priority_overridden, updated_at = @updated_at
+    WHERE id = @id
+  `).run({
+    id,
+    status: fields.status ?? existing.status,
+    priority: fields.priority ?? existing.priority,
+    priority_overridden: fields.priority !== undefined ? 1 : existing.priority_overridden,
+    updated_at: new Date().toISOString(),
+  });
+  return getBusinessMessage(db, id);
+}
+
+export function deleteBusinessMessage(db: Database.Database, id: number): boolean {
+  return db.prepare('DELETE FROM business_messages WHERE id = ?').run(id).changes > 0;
 }

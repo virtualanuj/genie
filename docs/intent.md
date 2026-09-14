@@ -47,6 +47,73 @@ and later helps you find it and reminds you when it's due.
   captured entries (by domain) and they're sorted so what's due
   soonest surfaces first.
 
+## Goals (v1.2) — Business message triage
+
+Inbound business messages (emails, Slack/Teams messages, customer
+notes) arrive faster than they can be read carefully, and it isn't
+obvious at a glance which ones need a reply first. Personal capture
+doesn't fit this: these aren't things *you* want to remember, they're
+things other people are waiting on.
+
+- **Separate Business tab.** A second tab, next to the existing
+  personal capture view, dedicated to triaging inbound messages.
+- **Paste and triage.** You paste a message (multi-line, any length
+  a normal email would be) and the genie classifies it into a
+  category — request, question, complaint, sales lead, FYI, or spam —
+  and assigns a priority: urgent, high, medium, or low.
+- **Explained priority.** Each message shows a one-line summary and a
+  short reason for the priority it was given, so you can trust (or
+  mentally discount) the ranking without re-reading the whole message.
+- **Correctable priority.** If the genie gets a priority wrong, you
+  can change it in one click. A changed priority is visibly marked as
+  edited, so you can tell your call apart from the genie's.
+- **Worst-first list.** Open messages are listed by priority (urgent
+  first), newest first within a priority.
+- **Open → done.** You mark a message done once it's handled; done
+  messages collapse out of the way but aren't lost. Messages can also
+  be deleted.
+- **Spam files itself away.** Messages classified as spam are saved as
+  already done, so they never clutter the open list, but you can
+  reopen one if the genie was wrong.
+- **Speak or paste.** The business box has the same mic option as the
+  personal one; dictated text is added to whatever is already typed.
+- **Filter and view like Tasks.** You can narrow the list by priority
+  and by category, and switch between list and card layouts, the same
+  way the Personal Tasks list works.
+- **Visible from anywhere.** The Business tab label shows how many
+  messages are still open, so you notice waiting messages while on
+  the Personal tab.
+- **Privacy-aware.** Email addresses, phone numbers, and long
+  card/account-like numbers are stripped from a message before it
+  leaves your machine for classification. The original stays in your
+  local database. Only the first ~1,000 characters are analyzed.
+
+## Non-goals (v1.2)
+
+- No editing of category, and no record of what the genie originally
+  picked once you override a priority.
+- No redaction of names, company names, or other free-text details.
+  Only emails, phone numbers, and long numbers are removed.
+- No analysis of very long threads beyond their first ~1,000
+  characters. The full text is still stored and viewable.
+- No link to personal entries — business messages don't appear in
+  Tasks, Due/Upcoming, or Ask Genie search, and don't create tasks or
+  reminders.
+- No email/Slack/inbox integration — messages are pasted by hand
+  (consistent with v1's no-integrations non-goal).
+- No richer workflow (in progress, waiting, assignee, SLA timers) —
+  just open and done.
+- No replies drafted or sent on your behalf.
+
+## Success criteria (v1.2)
+
+You can paste a business message and see its category, priority,
+summary, and reason within a few seconds. Urgent messages sit at the
+top of the open list. You can fix a wrong priority in one click. Spam
+never shows up among open messages. The Business tab shows how many
+messages are waiting. No email address or phone number from a pasted
+message is ever included in a request to Gemini (verified by tests).
+
 ## Non-goals (v1)
 
 These are deliberately out of scope for the first version, to keep it
