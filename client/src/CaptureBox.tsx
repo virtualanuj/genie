@@ -17,16 +17,20 @@ function getSpeechRecognition(): (new () => SpeechRecognitionLike) | undefined {
 export default function CaptureBox({ onCaptured }: { onCaptured: (entry: Entry) => void }) {
   const [text, setText] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const RecognitionCtor = getSpeechRecognition();
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!text.trim() || submitting) return;
     setSubmitting(true);
+    setError(null);
     try {
       const entry = await createEntry(text);
       onCaptured(entry);
       setText('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to add entry');
     } finally {
       setSubmitting(false);
     }
@@ -53,6 +57,7 @@ export default function CaptureBox({ onCaptured }: { onCaptured: (entry: Entry) 
         <button type="button" className="mic-button" aria-label="Speak" onClick={handleSpeak}>🎤</button>
       )}
       <button type="submit" className="add-button" disabled={submitting}>Add</button>
+      {error && <span className="capture-error" role="alert">{error}</span>}
     </form>
   );
 }

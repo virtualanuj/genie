@@ -34,7 +34,10 @@ export async function createEntry(rawText: string): Promise<Entry> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ raw_text: rawText }),
   });
-  if (!res.ok) throw new Error(`failed to create entry: ${res.status}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(body?.error ?? `failed to create entry: ${res.status}`);
+  }
   return res.json();
 }
 

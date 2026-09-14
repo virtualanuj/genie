@@ -485,6 +485,12 @@ select {
   font-size: 13px;
 }
 
+.capture-error {
+  width: 100%;
+  color: #d94f4f;
+  font-size: 13px;
+}
+
 /* ---- search ---- */
 
 .search-form {
