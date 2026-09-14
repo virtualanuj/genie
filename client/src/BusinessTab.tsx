@@ -3,34 +3,36 @@ import {
   triageBusinessMessage, listBusinessMessages, updateBusinessMessage, deleteBusinessMessage,
   sortBusinessMessages, PRIORITIES, type BusinessMessage,
 } from './api.js';
+import { getSpeechRecognition } from './speech.js';
 
-const CATEGORY_LABELS: Record<BusinessMessage['category'], string> = {
+type Priority = BusinessMessage['priority'];
+type Category = BusinessMessage['category'];
+type ViewMode = 'list' | 'card';
+
+const CATEGORY_LABELS: Record<Category, string> = {
   request: 'Request', question: 'Question', complaint: 'Complaint',
   sales_lead: 'Sales lead', fyi: 'FYI', spam: 'Spam',
 };
+const CATEGORIES = Object.keys(CATEGORY_LABELS) as Category[];
 
-function MessageRow({ message, error, onUpdate, onDelete }: {
+function MessageRow({ message, view, error, onUpdate, onDelete }: {
   message: BusinessMessage;
+  view: ViewMode;
   error: string | undefined;
   onUpdate: (m: BusinessMessage, fields: Partial<Pick<BusinessMessage, 'status' | 'priority'>>) => void;
   onDelete: (id: number) => void;
 }) {
+  const done = message.status === 'done';
+  const layoutClass = view === 'card' ? 'entry-card message-card' : 'message-row';
   return (
-    <li className={`message-row ${message.status === 'done' ? 'message-done' : ''}`}>
-      <input
-        type="checkbox"
-        className="message-check"
-        aria-label={`Done: ${message.summary}`}
-        checked={message.status === 'done'}
-        onChange={() => onUpdate(message, { status: message.status === 'open' ? 'done' : 'open' })}
-      />
+    <li className={`${layoutClass}${done ? ' message-done' : ''}`}>
       <div className="message-main">
         <div className="message-meta">
           <select
             aria-label="Priority"
             className={`priority-badge priority-${message.priority}`}
             value={message.priority}
-            onChange={(e) => onUpdate(message, { priority: e.target.value as BusinessMessage['priority'] })}
+            onChange={(e) => onUpdate(message, { priority: e.target.value as Priority })}
           >
             {PRIORITIES.map((p) => <option key={p} value={p}>{p}</option>)}
           </select>
@@ -48,8 +50,42 @@ function MessageRow({ message, error, onUpdate, onDelete }: {
         </details>
         {error && <span className="row-error" role="alert">{error}</span>}
       </div>
-      <button type="button" className="btn-text btn-danger" onClick={() => onDelete(message.id)}>Delete</button>
+      <div className="message-actions">
+        <button
+          type="button"
+          className={`btn-text done-toggle${done ? ' active' : ''}`}
+          aria-pressed={done}
+          aria-label={`${done ? 'Reopen' : 'Mark done'}: ${message.summary}`}
+          onClick={() => onUpdate(message, { status: done ? 'open' : 'done' })}
+        >
+          {done ? 'Reopen' : 'Mark done'}
+        </button>
+        <button type="button" className="btn-text btn-danger" onClick={() => onDelete(message.id)}>Delete</button>
+      </div>
     </li>
+  );
+}
+
+function FilterPills<T extends string>({ label, values, labelFor, selected, onSelect }: {
+  label: string;
+  values: T[];
+  labelFor: (value: T) => string;
+  selected: T | 'all';
+  onSelect: (value: T | 'all') => void;
+}) {
+  return (
+    <div className="filter-pills" role="group" aria-label={label}>
+      {(['all', ...values] as (T | 'all')[]).map((v) => (
+        <button
+          key={v}
+          type="button"
+          className={`filter-pill${selected === v ? ' active' : ''}`}
+          onClick={() => onSelect(v)}
+        >
+          {v === 'all' ? 'All' : labelFor(v)}
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -60,18 +96,30 @@ export default function BusinessTab({ onOpenCountChange }: { onOpenCountChange?:
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [rowErrors, setRowErrors] = useState<Record<number, string>>({});
+  const [priorityFilter, setPriorityFilter] = useState<Priority | 'all'>('all');
+  const [categoryFilter, setCategoryFilter] = useState<Category | 'all'>('all');
+  const [view, setView] = useState<ViewMode>('list');
+  const RecognitionCtor = getSpeechRecognition();
 
   useEffect(() => {
     listBusinessMessages().then(setMessages).catch(() => {}).finally(() => setLoaded(true));
   }, []);
 
-  const open = messages.filter((m) => m.status === 'open');
-  const done = messages.filter((m) => m.status === 'done');
+  // The tab badge counts every open message, regardless of the filters below.
+  const totalOpen = messages.filter((m) => m.status === 'open').length;
 
   // Only report after the initial load, so the tab count never flashes to 0.
   useEffect(() => {
-    if (loaded) onOpenCountChange?.(open.length);
-  }, [loaded, open.length, onOpenCountChange]);
+    if (loaded) onOpenCountChange?.(totalOpen);
+  }, [loaded, totalOpen, onOpenCountChange]);
+
+  const visible = messages.filter(
+    (m) =>
+      (priorityFilter === 'all' || m.priority === priorityFilter) &&
+      (categoryFilter === 'all' || m.category === categoryFilter)
+  );
+  const open = visible.filter((m) => m.status === 'open');
+  const done = visible.filter((m) => m.status === 'done');
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -87,6 +135,17 @@ export default function BusinessTab({ onOpenCountChange }: { onOpenCountChange?:
     } finally {
       setSubmitting(false);
     }
+  }
+
+  // Appends rather than replaces, so a message can be dictated in parts.
+  function handleSpeak() {
+    if (!RecognitionCtor) return;
+    const recognition = new RecognitionCtor();
+    recognition.onresult = (event) => {
+      const transcript = event.results[0][0].transcript;
+      setText((prev) => (prev.trim() ? `${prev} ${transcript}` : transcript));
+    };
+    recognition.start();
   }
 
   // Not optimistic: the row only changes after the server confirms (spec.md "Row errors").
@@ -113,9 +172,20 @@ export default function BusinessTab({ onOpenCountChange }: { onOpenCountChange?:
     });
   }
 
+  const listClass = view === 'card' ? 'entry-cards' : 'message-list';
   const row = (m: BusinessMessage) => (
-    <MessageRow key={m.id} message={m} error={rowErrors[m.id]} onUpdate={handleUpdate} onDelete={handleDelete} />
+    <MessageRow
+      key={m.id}
+      message={m}
+      view={view}
+      error={rowErrors[m.id]}
+      onUpdate={handleUpdate}
+      onDelete={handleDelete}
+    />
   );
+
+  let openEmptyNote = 'Nothing waiting on you.';
+  if (messages.length > 0 && visible.length === 0) openEmptyNote = 'No messages match these filters.';
 
   return (
     <>
@@ -129,6 +199,9 @@ export default function BusinessTab({ onOpenCountChange }: { onOpenCountChange?:
         />
         <div className="triage-actions">
           {error && <span className="capture-error" role="alert">{error}</span>}
+          {RecognitionCtor && (
+            <button type="button" className="mic-button" aria-label="Speak" onClick={handleSpeak}>🎤</button>
+          )}
           <button type="submit" className="add-button" disabled={submitting}>
             {submitting ? 'Triaging…' : 'Triage'}
           </button>
@@ -140,17 +213,55 @@ export default function BusinessTab({ onOpenCountChange }: { onOpenCountChange?:
           Open
           {open.length > 0 && <span className="section-count">{open.length}</span>}
         </h2>
+        {messages.length > 0 && (
+          <div className="list-controls business-controls">
+            <div className="filter-stack">
+              <FilterPills
+                label="Filter by priority"
+                values={PRIORITIES}
+                labelFor={(p) => p[0].toUpperCase() + p.slice(1)}
+                selected={priorityFilter}
+                onSelect={setPriorityFilter}
+              />
+              <FilterPills
+                label="Filter by category"
+                values={CATEGORIES}
+                labelFor={(c) => CATEGORY_LABELS[c]}
+                selected={categoryFilter}
+                onSelect={setCategoryFilter}
+              />
+            </div>
+            <div className="view-toggle">
+              <button
+                type="button"
+                className={`view-toggle-btn${view === 'list' ? ' active' : ''}`}
+                aria-label="List view"
+                onClick={() => setView('list')}
+              >
+                ☰
+              </button>
+              <button
+                type="button"
+                className={`view-toggle-btn${view === 'card' ? ' active' : ''}`}
+                aria-label="Card view"
+                onClick={() => setView('card')}
+              >
+                ▦
+              </button>
+            </div>
+          </div>
+        )}
         {open.length === 0 ? (
-          <p className="empty-note">Nothing waiting on you.</p>
+          <p className="empty-note">{openEmptyNote}</p>
         ) : (
-          <ul className="message-list">{open.map(row)}</ul>
+          <ul className={listClass}>{open.map(row)}</ul>
         )}
       </section>
 
       {done.length > 0 && (
         <details className="section done-section">
           <summary className="section-title">Done ({done.length})</summary>
-          <ul className="message-list">{done.map(row)}</ul>
+          <ul className={listClass}>{done.map(row)}</ul>
         </details>
       )}
     </>

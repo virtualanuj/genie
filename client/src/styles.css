@@ -735,3 +735,24 @@ select.priority-badge { appearance: none; cursor: pointer; }
 .row-error { display: block; margin-top: 6px; color: var(--danger); font-size: 12px; }
 
 .done-section summary { cursor: pointer; }
+
+.business-controls { align-items: flex-start; }
+.filter-stack { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+
+.message-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+
+.message-card { gap: 10px; }
+.message-card .message-main { min-width: 0; }
+.message-card .message-actions {
+  margin-top: auto;
+  justify-content: space-between;
+}
+
+.done-toggle { color: var(--text-muted); }
+.done-toggle:hover { color: var(--accent); }
+.done-toggle.active { color: var(--accent); background: var(--accent-soft); }
